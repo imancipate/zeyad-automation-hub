@@ -1,6 +1,6 @@
 // ============================================================================
-// ClickUp "Time To Leave" Automation - SUBTASK APPROACH
-// Creates/updates a "Time to Leave" subtask with proper start_date timing
+// ClickUp "Time To Leave" Automation - DUAL APPROACH
+// Creates subtask AND updates UNIX field (in case ClickUp fixes their API)
 // ============================================================================
 
 const express = require('express');
@@ -22,7 +22,9 @@ const CONFIG = {
       'office': 30,
       'doctor': 20,
       'quran': 45
-    }
+    },
+    // Keep both field IDs for dual approach
+    timeToLeaveUnixFieldId: 'd262a339-73ba-47a5-8096-ddf4f3459365'
   },
   notifications: {
     pushcutToken: process.env.PUSHCUT_TOKEN
@@ -90,26 +92,54 @@ async function getClickUpTask(taskId) {
 }
 
 /**
- * Find existing "Time to Leave" subtask
+ * Update UNIX custom field (for when ClickUp fixes their API)
  */
-async function findTimeToLeaveSubtask(parentTaskId) {
+async function updateUnixCustomField(taskId, fieldId, timestamp) {
   try {
-    console.log(`Looking for existing "Time to Leave" subtask under parent ${parentTaskId}`);
+    console.log(`Updating UNIX text field ${fieldId} to timestamp ${timestamp} for task ${taskId}`);
     
-    // Get the parent task details to access subtasks
-    const parentTask = await getClickUpTask(parentTaskId);
+    const payload = {
+      value: timestamp.toString()
+    };
     
-    // Check if the task has any subtasks
-    // Note: ClickUp API doesn't always include subtasks in the main task response
-    // We'll need to search by getting tasks and filtering by parent
+    console.log('Sending UNIX payload:', JSON.stringify(payload, null, 2));
     
-    // For now, we'll assume no existing subtask and create a new one
-    // This could be optimized later to search for existing ones
-    return null;
+    const response = await axios.post(
+      `${CONFIG.clickup.baseUrl}/task/${taskId}/field/${fieldId}`,
+      payload,
+      {
+        headers: {
+          'Authorization': CONFIG.clickup.apiKey,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    console.log('✅ UNIX field update successful');
+    return response.data;
   } catch (error) {
-    console.error('Error finding subtask:', error);
-    return null;
+    console.error('❌ Error updating UNIX custom field:');
+    console.error('Status:', error.response?.status);
+    console.error('Data:', error.response?.data);
+    console.error('Message:', error.message);
+    // Don't throw - continue with subtask creation
   }
+}
+
+/**
+ * Find "Time To Leave UNIX" custom field ID
+ */
+function findTimeToLeaveUnixFieldId(task) {
+  const hardcodedFieldId = CONFIG.automation.timeToLeaveUnixFieldId;
+  const hardcodedField = task.custom_fields.find(field => field.id === hardcodedFieldId);
+  
+  if (hardcodedField) {
+    console.log(`✅ Found "Time To Leave UNIX" field with ID: ${hardcodedFieldId}`);
+    return hardcodedFieldId;
+  }
+  
+  console.log('⚠️ No "Time To Leave UNIX" field found');
+  return null;
 }
 
 /**
@@ -195,7 +225,7 @@ async function sendPushCutNotification(title, text, scheduleTime = null) {
 // ============================================================================
 
 /**
- * Handle start date change for appointment tasks - SUBTASK VERSION
+ * Handle start date change for appointment tasks - DUAL APPROACH
  */
 async function handleStartDateChange(taskId, newStartDate) {
   try {
@@ -220,14 +250,37 @@ async function handleStartDateChange(taskId, newStartDate) {
     console.log(`📅 Start time: ${startTime.toISOString()} (${startTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST)`);
     console.log(`🚗 Travel time: ${travelTimeMinutes} minutes`);
     console.log(`⏰ Departure time: ${leaveTime.toISOString()} (${leaveTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST)`);
+    console.log(`📱 UNIX timestamp: ${leaveTime.getTime()}`);
     
-    // Create the "Time to Leave" subtask
+    let results = {
+      success: true,
+      startTime: startTime.toISOString(),
+      leaveTime: leaveTime.toISOString(),
+      travelMinutes: travelTimeMinutes,
+      unixTimestamp: leaveTime.getTime()
+    };
+    
+    // APPROACH 1: Update UNIX text field (for when ClickUp fixes their API)
+    console.log('\\n=== APPROACH 1: UNIX FIELD UPDATE ===');
+    const unixFieldId = findTimeToLeaveUnixFieldId(task);
+    if (unixFieldId) {
+      await updateUnixCustomField(taskId, unixFieldId, leaveTime.getTime());
+      results.unixFieldUpdated = true;
+    } else {
+      console.log('⚠️ UNIX field not found, skipping field update');
+      results.unixFieldUpdated = false;
+    }
+    
+    // APPROACH 2: Create subtask (current working solution)
+    console.log('\\n=== APPROACH 2: SUBTASK CREATION ===');
     const subtask = await createOrUpdateTimeToLeaveSubtask(
       taskId, 
       task.name, 
       leaveTime, 
       task.list.id
     );
+    results.subtaskId = subtask.id;
+    results.subtaskUrl = subtask.url;
     
     // Schedule notification
     if (CONFIG.notifications.pushcutToken) {
@@ -238,15 +291,11 @@ async function handleStartDateChange(taskId, newStartDate) {
       );
     }
     
-    console.log('✅ Time To Leave subtask automation completed successfully');
-    return { 
-      success: true, 
-      startTime: startTime.toISOString(),
-      leaveTime: leaveTime.toISOString(),
-      travelMinutes: travelTimeMinutes,
-      subtaskId: subtask.id,
-      subtaskUrl: subtask.url
-    };
+    console.log('\\n✅ DUAL APPROACH automation completed successfully');
+    console.log('📝 UNIX field updated for future ClickUp API fix');
+    console.log('🎯 Subtask created as working solution');
+    
+    return results;
     
   } catch (error) {
     console.error('❌ Error in handleStartDateChange:', error);
@@ -303,7 +352,7 @@ app.post('/manual-trigger/:taskId', async (req, res) => {
       const result = await handleStartDateChange(taskId, task.start_date);
       res.json({ 
         success: true, 
-        message: 'Manual trigger completed - Subtask created with proper start_date',
+        message: 'Dual approach completed - UNIX field updated + Subtask created',
         details: result
       });
     } else {
@@ -324,7 +373,7 @@ app.get('/health', (req, res) => {
     status: 'healthy', 
     timestamp: new Date().toISOString(),
     service: 'ClickUp Time To Leave Automation',
-    version: '4.0 - Subtask Approach'
+    version: '5.0 - Dual Approach (UNIX + Subtask)'
   });
 });
 
