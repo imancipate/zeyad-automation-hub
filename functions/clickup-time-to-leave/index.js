@@ -92,18 +92,24 @@ async function getClickUpTask(taskId) {
 }
 
 /**
- * Update custom field in ClickUp - FIXED VERSION
+ * Update custom field in ClickUp - FIXED VERSION WITH TIME SUPPORT
  */
-async function updateCustomField(taskId, fieldId, value) {
+async function updateCustomField(taskId, fieldId, timestamp) {
   try {
-    console.log(`Updating field ${fieldId} to value ${value} for task ${taskId}`);
+    console.log(`Updating field ${fieldId} to timestamp ${timestamp} for task ${taskId}`);
+    
+    // For date fields with time, we need to send both value and time: true
+    const payload = {
+      value: timestamp.toString(),
+      time: true  // This tells ClickUp to display the time, not just the date
+    };
+    
+    console.log('Sending payload:', JSON.stringify(payload, null, 2));
     
     // Use the correct ClickUp API endpoint format
     const response = await axios.post(
       `${CONFIG.clickup.baseUrl}/task/${taskId}/field/${fieldId}`,
-      {
-        value: value.toString() // Ensure value is string
-      },
+      payload,
       {
         headers: {
           'Authorization': CONFIG.clickup.apiKey,
@@ -234,7 +240,7 @@ async function handleStartDateChange(taskId, newStartDate) {
     console.log(`⏰ Departure time: ${leaveTime.toISOString()} (${leaveTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST)`);
     console.log(`📱 Timestamp to save: ${leaveTime.getTime()}`);
     
-    // Update the custom field
+    // Update the custom field with time support
     await updateCustomField(taskId, timeToLeaveFieldId, leaveTime.getTime());
     
     // Schedule notification
@@ -330,7 +336,7 @@ app.get('/health', (req, res) => {
     status: 'healthy', 
     timestamp: new Date().toISOString(),
     service: 'ClickUp Time To Leave Automation',
-    version: '2.1'
+    version: '2.2'
   });
 });
 
