@@ -22,7 +22,9 @@ const CONFIG = {
       'office': 30,
       'doctor': 20,
       'quran': 45
-    }
+    },
+    // Hardcoded Time To Leave field ID (discovered from API)
+    timeToLeaveFieldId: '7d8d70f5-c49a-4d56-b65c-cd30aa5f143a'
   },
   notifications: {
     pushcutToken: process.env.PUSHCUT_TOKEN
@@ -123,9 +125,19 @@ async function updateCustomField(taskId, fieldId, value) {
 }
 
 /**
- * Find "Time To Leave" custom field ID
+ * Find "Time To Leave" custom field ID - UPDATED TO USE HARDCODED ID
  */
 function findTimeToLeaveFieldId(task) {
+  // First try the hardcoded field ID
+  const hardcodedFieldId = CONFIG.automation.timeToLeaveFieldId;
+  const hardcodedField = task.custom_fields.find(field => field.id === hardcodedFieldId);
+  
+  if (hardcodedField) {
+    console.log(`✅ Found hardcoded "Time To Leave" field with ID: ${hardcodedFieldId}`);
+    return hardcodedFieldId;
+  }
+  
+  // Fallback to dynamic search
   const timeFields = task.custom_fields.filter(field => 
     field.name.toLowerCase().includes('time to leave') ||
     field.name.toLowerCase().includes('departure') ||
@@ -137,7 +149,11 @@ function findTimeToLeaveFieldId(task) {
     return timeFields[0].id;
   }
   
-  console.log('No "Time To Leave" field found');
+  console.log('❌ No "Time To Leave" field found');
+  console.log('Available custom fields:');
+  task.custom_fields.forEach(field => {
+    console.log(`  - ${field.name} (${field.id}) - Type: ${field.type}`);
+  });
   return null;
 }
 
@@ -314,7 +330,7 @@ app.get('/health', (req, res) => {
     status: 'healthy', 
     timestamp: new Date().toISOString(),
     service: 'ClickUp Time To Leave Automation',
-    version: '2.0'
+    version: '2.1'
   });
 });
 
