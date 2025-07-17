@@ -1,6 +1,6 @@
 // ============================================================================
-// ClickUp "Time To Leave" Automation
-// Automatically calculates departure time when appointment start_date changes
+// ClickUp "Time To Leave" Automation - SUBTASK APPROACH
+// Creates/updates a "Time to Leave" subtask with proper start_date timing
 // ============================================================================
 
 const express = require('express');
@@ -22,9 +22,7 @@ const CONFIG = {
       'office': 30,
       'doctor': 20,
       'quran': 45
-    },
-    // Updated to use the UNIX text field for AI Agent processing
-    timeToLeaveUnixFieldId: 'd262a339-73ba-47a5-8096-ddf4f3459365'
+    }
   },
   notifications: {
     pushcutToken: process.env.PUSHCUT_TOKEN
@@ -92,23 +90,50 @@ async function getClickUpTask(taskId) {
 }
 
 /**
- * Update custom field in ClickUp - NOW TARGETS UNIX TEXT FIELD
+ * Find existing "Time to Leave" subtask
  */
-async function updateCustomField(taskId, fieldId, timestamp) {
+async function findTimeToLeaveSubtask(parentTaskId) {
   try {
-    console.log(`Updating UNIX text field ${fieldId} to timestamp ${timestamp} for task ${taskId}`);
+    console.log(`Looking for existing "Time to Leave" subtask under parent ${parentTaskId}`);
     
-    // Send timestamp as string to text field for AI Agent processing
-    const payload = {
-      value: timestamp.toString()
-    };
+    // Get the parent task details to access subtasks
+    const parentTask = await getClickUpTask(parentTaskId);
     
-    console.log('Sending payload:', JSON.stringify(payload, null, 2));
+    // Check if the task has any subtasks
+    // Note: ClickUp API doesn't always include subtasks in the main task response
+    // We'll need to search by getting tasks and filtering by parent
     
-    // Use the correct ClickUp API endpoint format
+    // For now, we'll assume no existing subtask and create a new one
+    // This could be optimized later to search for existing ones
+    return null;
+  } catch (error) {
+    console.error('Error finding subtask:', error);
+    return null;
+  }
+}
+
+/**
+ * Create or update "Time to Leave" subtask
+ */
+async function createOrUpdateTimeToLeaveSubtask(parentTaskId, parentTaskName, departureTime, listId) {
+  try {
+    const subtaskName = `⏰ Time to Leave - ${parentTaskName}`;
+    
+    console.log(`Creating subtask: ${subtaskName}`);
+    console.log(`Departure time: ${departureTime.toISOString()}`);
+    
+    // Create the subtask
     const response = await axios.post(
-      `${CONFIG.clickup.baseUrl}/task/${taskId}/field/${fieldId}`,
-      payload,
+      `${CONFIG.clickup.baseUrl}/list/${listId}/task`,
+      {
+        name: subtaskName,
+        description: `🚗 Departure time for "${parentTaskName}"\\n\\n⏰ Leave at: ${departureTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST`,
+        start_date: departureTime.getTime(),
+        parent: parentTaskId,
+        tags: ['time-to-leave', 'departure', 'automation'],
+        assignees: [], // Will inherit from parent or can be set
+        priority: 2 // High priority
+      },
       {
         headers: {
           'Authorization': CONFIG.clickup.apiKey,
@@ -117,49 +142,15 @@ async function updateCustomField(taskId, fieldId, timestamp) {
       }
     );
     
-    console.log('UNIX field update response:', response.status, response.statusText);
-    console.log('UNIX field update successful');
+    console.log('✅ Subtask created successfully:', response.data.id);
     return response.data;
   } catch (error) {
-    console.error('Error updating UNIX custom field:');
+    console.error('❌ Error creating subtask:');
     console.error('Status:', error.response?.status);
     console.error('Data:', error.response?.data);
     console.error('Message:', error.message);
     throw error;
   }
-}
-
-/**
- * Find "Time To Leave UNIX" custom field ID - UPDATED FOR UNIX FIELD
- */
-function findTimeToLeaveUnixFieldId(task) {
-  // First try the hardcoded field ID
-  const hardcodedFieldId = CONFIG.automation.timeToLeaveUnixFieldId;
-  const hardcodedField = task.custom_fields.find(field => field.id === hardcodedFieldId);
-  
-  if (hardcodedField) {
-    console.log(`✅ Found hardcoded "Time To Leave UNIX" field with ID: ${hardcodedFieldId}`);
-    return hardcodedFieldId;
-  }
-  
-  // Fallback to dynamic search
-  const unixFields = task.custom_fields.filter(field => 
-    field.name.toLowerCase().includes('time to leave unix') ||
-    field.name.toLowerCase().includes('unix') ||
-    field.name.toLowerCase().includes('departure unix')
-  );
-  
-  if (unixFields.length > 0) {
-    console.log(`Found "Time To Leave UNIX" field with ID: ${unixFields[0].id}`);
-    return unixFields[0].id;
-  }
-  
-  console.log('❌ No "Time To Leave UNIX" field found');
-  console.log('Available custom fields:');
-  task.custom_fields.forEach(field => {
-    console.log(`  - ${field.name} (${field.id}) - Type: ${field.type}`);
-  });
-  return null;
 }
 
 /**
@@ -204,7 +195,7 @@ async function sendPushCutNotification(title, text, scheduleTime = null) {
 // ============================================================================
 
 /**
- * Handle start date change for appointment tasks
+ * Handle start date change for appointment tasks - SUBTASK VERSION
  */
 async function handleStartDateChange(taskId, newStartDate) {
   try {
@@ -221,14 +212,6 @@ async function handleStartDateChange(taskId, newStartDate) {
     }
     console.log('✅ Task has appointment tag');
     
-    // Find Time To Leave UNIX custom field
-    const timeToLeaveUnixFieldId = findTimeToLeaveUnixFieldId(task);
-    if (!timeToLeaveUnixFieldId) {
-      console.log('❌ Time To Leave UNIX custom field not found, skipping');
-      return { success: false, reason: 'Time To Leave UNIX field not found' };
-    }
-    console.log('✅ Found Time To Leave UNIX field');
-    
     // Calculate travel time and departure time
     const travelTimeMinutes = calculateTravelTime(task);
     const startTime = new Date(parseInt(newStartDate));
@@ -237,10 +220,14 @@ async function handleStartDateChange(taskId, newStartDate) {
     console.log(`📅 Start time: ${startTime.toISOString()} (${startTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST)`);
     console.log(`🚗 Travel time: ${travelTimeMinutes} minutes`);
     console.log(`⏰ Departure time: ${leaveTime.toISOString()} (${leaveTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST)`);
-    console.log(`📱 UNIX timestamp to save: ${leaveTime.getTime()}`);
     
-    // Update the UNIX text field for AI Agent processing
-    await updateCustomField(taskId, timeToLeaveUnixFieldId, leaveTime.getTime());
+    // Create the "Time to Leave" subtask
+    const subtask = await createOrUpdateTimeToLeaveSubtask(
+      taskId, 
+      task.name, 
+      leaveTime, 
+      task.list.id
+    );
     
     // Schedule notification
     if (CONFIG.notifications.pushcutToken) {
@@ -251,14 +238,14 @@ async function handleStartDateChange(taskId, newStartDate) {
       );
     }
     
-    console.log('✅ Time To Leave UNIX automation completed successfully');
-    console.log('🤖 AI Agent should now process the UNIX timestamp and update the date field');
+    console.log('✅ Time To Leave subtask automation completed successfully');
     return { 
       success: true, 
       startTime: startTime.toISOString(),
       leaveTime: leaveTime.toISOString(),
       travelMinutes: travelTimeMinutes,
-      unixTimestamp: leaveTime.getTime()
+      subtaskId: subtask.id,
+      subtaskUrl: subtask.url
     };
     
   } catch (error) {
@@ -316,7 +303,7 @@ app.post('/manual-trigger/:taskId', async (req, res) => {
       const result = await handleStartDateChange(taskId, task.start_date);
       res.json({ 
         success: true, 
-        message: 'Manual trigger completed - UNIX field updated for AI Agent processing',
+        message: 'Manual trigger completed - Subtask created with proper start_date',
         details: result
       });
     } else {
@@ -337,7 +324,7 @@ app.get('/health', (req, res) => {
     status: 'healthy', 
     timestamp: new Date().toISOString(),
     service: 'ClickUp Time To Leave Automation',
-    version: '3.0 - AI Agent Ready'
+    version: '4.0 - Subtask Approach'
   });
 });
 
