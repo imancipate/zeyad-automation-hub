@@ -23,8 +23,8 @@ const CONFIG = {
       'doctor': 20,
       'quran': 45
     },
-    // Hardcoded Time To Leave field ID (discovered from API)
-    timeToLeaveFieldId: '7d8d70f5-c49a-4d56-b65c-cd30aa5f143a'
+    // Updated to use the UNIX text field for AI Agent processing
+    timeToLeaveUnixFieldId: 'd262a339-73ba-47a5-8096-ddf4f3459365'
   },
   notifications: {
     pushcutToken: process.env.PUSHCUT_TOKEN
@@ -92,15 +92,15 @@ async function getClickUpTask(taskId) {
 }
 
 /**
- * Update custom field in ClickUp - TESTING NUMBER FORMAT
+ * Update custom field in ClickUp - NOW TARGETS UNIX TEXT FIELD
  */
 async function updateCustomField(taskId, fieldId, timestamp) {
   try {
-    console.log(`Updating field ${fieldId} to timestamp ${timestamp} for task ${taskId}`);
+    console.log(`Updating UNIX text field ${fieldId} to timestamp ${timestamp} for task ${taskId}`);
     
-    // Try sending just the timestamp as a number (not string)
+    // Send timestamp as string to text field for AI Agent processing
     const payload = {
-      value: timestamp  // Send as number, not string
+      value: timestamp.toString()
     };
     
     console.log('Sending payload:', JSON.stringify(payload, null, 2));
@@ -117,11 +117,11 @@ async function updateCustomField(taskId, fieldId, timestamp) {
       }
     );
     
-    console.log('Field update response:', response.status, response.statusText);
-    console.log('Field update successful');
+    console.log('UNIX field update response:', response.status, response.statusText);
+    console.log('UNIX field update successful');
     return response.data;
   } catch (error) {
-    console.error('Error updating custom field:');
+    console.error('Error updating UNIX custom field:');
     console.error('Status:', error.response?.status);
     console.error('Data:', error.response?.data);
     console.error('Message:', error.message);
@@ -130,31 +130,31 @@ async function updateCustomField(taskId, fieldId, timestamp) {
 }
 
 /**
- * Find "Time To Leave" custom field ID - UPDATED TO USE HARDCODED ID
+ * Find "Time To Leave UNIX" custom field ID - UPDATED FOR UNIX FIELD
  */
-function findTimeToLeaveFieldId(task) {
+function findTimeToLeaveUnixFieldId(task) {
   // First try the hardcoded field ID
-  const hardcodedFieldId = CONFIG.automation.timeToLeaveFieldId;
+  const hardcodedFieldId = CONFIG.automation.timeToLeaveUnixFieldId;
   const hardcodedField = task.custom_fields.find(field => field.id === hardcodedFieldId);
   
   if (hardcodedField) {
-    console.log(`✅ Found hardcoded "Time To Leave" field with ID: ${hardcodedFieldId}`);
+    console.log(`✅ Found hardcoded "Time To Leave UNIX" field with ID: ${hardcodedFieldId}`);
     return hardcodedFieldId;
   }
   
   // Fallback to dynamic search
-  const timeFields = task.custom_fields.filter(field => 
-    field.name.toLowerCase().includes('time to leave') ||
-    field.name.toLowerCase().includes('departure') ||
-    field.name.toLowerCase().includes('leave time')
+  const unixFields = task.custom_fields.filter(field => 
+    field.name.toLowerCase().includes('time to leave unix') ||
+    field.name.toLowerCase().includes('unix') ||
+    field.name.toLowerCase().includes('departure unix')
   );
   
-  if (timeFields.length > 0) {
-    console.log(`Found "Time To Leave" field with ID: ${timeFields[0].id}`);
-    return timeFields[0].id;
+  if (unixFields.length > 0) {
+    console.log(`Found "Time To Leave UNIX" field with ID: ${unixFields[0].id}`);
+    return unixFields[0].id;
   }
   
-  console.log('❌ No "Time To Leave" field found');
+  console.log('❌ No "Time To Leave UNIX" field found');
   console.log('Available custom fields:');
   task.custom_fields.forEach(field => {
     console.log(`  - ${field.name} (${field.id}) - Type: ${field.type}`);
@@ -221,13 +221,13 @@ async function handleStartDateChange(taskId, newStartDate) {
     }
     console.log('✅ Task has appointment tag');
     
-    // Find Time To Leave custom field
-    const timeToLeaveFieldId = findTimeToLeaveFieldId(task);
-    if (!timeToLeaveFieldId) {
-      console.log('❌ Time To Leave custom field not found, skipping');
-      return { success: false, reason: 'Time To Leave field not found' };
+    // Find Time To Leave UNIX custom field
+    const timeToLeaveUnixFieldId = findTimeToLeaveUnixFieldId(task);
+    if (!timeToLeaveUnixFieldId) {
+      console.log('❌ Time To Leave UNIX custom field not found, skipping');
+      return { success: false, reason: 'Time To Leave UNIX field not found' };
     }
-    console.log('✅ Found Time To Leave field');
+    console.log('✅ Found Time To Leave UNIX field');
     
     // Calculate travel time and departure time
     const travelTimeMinutes = calculateTravelTime(task);
@@ -237,10 +237,10 @@ async function handleStartDateChange(taskId, newStartDate) {
     console.log(`📅 Start time: ${startTime.toISOString()} (${startTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST)`);
     console.log(`🚗 Travel time: ${travelTimeMinutes} minutes`);
     console.log(`⏰ Departure time: ${leaveTime.toISOString()} (${leaveTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST)`);
-    console.log(`📱 Timestamp to save: ${leaveTime.getTime()}`);
+    console.log(`📱 UNIX timestamp to save: ${leaveTime.getTime()}`);
     
-    // Update the custom field
-    await updateCustomField(taskId, timeToLeaveFieldId, leaveTime.getTime());
+    // Update the UNIX text field for AI Agent processing
+    await updateCustomField(taskId, timeToLeaveUnixFieldId, leaveTime.getTime());
     
     // Schedule notification
     if (CONFIG.notifications.pushcutToken) {
@@ -251,12 +251,14 @@ async function handleStartDateChange(taskId, newStartDate) {
       );
     }
     
-    console.log('✅ Time To Leave automation completed successfully');
+    console.log('✅ Time To Leave UNIX automation completed successfully');
+    console.log('🤖 AI Agent should now process the UNIX timestamp and update the date field');
     return { 
       success: true, 
       startTime: startTime.toISOString(),
       leaveTime: leaveTime.toISOString(),
-      travelMinutes: travelTimeMinutes 
+      travelMinutes: travelTimeMinutes,
+      unixTimestamp: leaveTime.getTime()
     };
     
   } catch (error) {
@@ -314,7 +316,7 @@ app.post('/manual-trigger/:taskId', async (req, res) => {
       const result = await handleStartDateChange(taskId, task.start_date);
       res.json({ 
         success: true, 
-        message: 'Manual trigger completed',
+        message: 'Manual trigger completed - UNIX field updated for AI Agent processing',
         details: result
       });
     } else {
@@ -335,7 +337,7 @@ app.get('/health', (req, res) => {
     status: 'healthy', 
     timestamp: new Date().toISOString(),
     service: 'ClickUp Time To Leave Automation',
-    version: '2.3'
+    version: '3.0 - AI Agent Ready'
   });
 });
 
