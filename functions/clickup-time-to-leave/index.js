@@ -293,15 +293,18 @@ app.get('/task-fields/:taskId', async (req, res) => {
 });
 
 // ============================================================================
-// Server Setup
+// Google Cloud Functions Export
 // ============================================================================
 
-const PORT = process.env.PORT || 3000;
+// For Google Cloud Functions
+exports.app = app;
 
-app.listen(PORT, () => {
-  console.log(`ClickUp Time To Leave automation server running on port ${PORT}`);
-  console.log(`Webhook endpoint: /clickup-webhook`);
-  console.log(`Health check: /health`);
-});
-
-module.exports = app;
+// For local development
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`ClickUp Time To Leave automation server running on port ${PORT}`);
+    console.log(`Webhook endpoint: /clickup-webhook`);
+    console.log(`Health check: /health`);
+  });
+}
