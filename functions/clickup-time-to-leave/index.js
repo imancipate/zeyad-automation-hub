@@ -48,10 +48,12 @@ function calculateTravelTime(task) {
   
   for (const [keyword, minutes] of Object.entries(CONFIG.automation.customTravelTimes)) {
     if (text.includes(keyword)) {
+      console.log(`Found keyword "${keyword}" - using ${minutes} minutes travel time`);
       return minutes;
     }
   }
   
+  console.log(`No keywords found - using default ${CONFIG.automation.defaultTravelTime} minutes`);
   return CONFIG.automation.defaultTravelTime;
 }
 
@@ -69,6 +71,7 @@ function hasAppointmentTag(task) {
  */
 async function getClickUpTask(taskId) {
   try {
+    console.log(`Fetching task details for ${taskId}`);
     const response = await axios.get(
       `${CONFIG.clickup.baseUrl}/task/${taskId}`,
       {
@@ -78,6 +81,7 @@ async function getClickUpTask(taskId) {
         }
       }
     );
+    console.log(`Successfully fetched task: ${response.data.name}`);
     return response.data;
   } catch (error) {
     console.error('Error fetching task:', error.response?.data || error.message);
@@ -86,13 +90,18 @@ async function getClickUpTask(taskId) {
 }
 
 /**
- * Update custom field in ClickUp
+ * Update custom field in ClickUp - FIXED VERSION
  */
 async function updateCustomField(taskId, fieldId, value) {
   try {
+    console.log(`Updating field ${fieldId} to value ${value} for task ${taskId}`);
+    
+    // Use the correct ClickUp API endpoint format
     const response = await axios.post(
       `${CONFIG.clickup.baseUrl}/task/${taskId}/field/${fieldId}`,
-      { value },
+      {
+        value: value.toString() // Ensure value is string
+      },
       {
         headers: {
           'Authorization': CONFIG.clickup.apiKey,
@@ -100,9 +109,15 @@ async function updateCustomField(taskId, fieldId, value) {
         }
       }
     );
+    
+    console.log('Field update response:', response.status, response.statusText);
+    console.log('Field update successful');
     return response.data;
   } catch (error) {
-    console.error('Error updating custom field:', error.response?.data || error.message);
+    console.error('Error updating custom field:');
+    console.error('Status:', error.response?.status);
+    console.error('Data:', error.response?.data);
+    console.error('Message:', error.message);
     throw error;
   }
 }
@@ -117,7 +132,13 @@ function findTimeToLeaveFieldId(task) {
     field.name.toLowerCase().includes('leave time')
   );
   
-  return timeFields.length > 0 ? timeFields[0].id : null;
+  if (timeFields.length > 0) {
+    console.log(`Found "Time To Leave" field with ID: ${timeFields[0].id}`);
+    return timeFields[0].id;
+  }
+  
+  console.log('No "Time To Leave" field found');
+  return null;
 }
 
 /**
@@ -166,46 +187,60 @@ async function sendPushCutNotification(title, text, scheduleTime = null) {
  */
 async function handleStartDateChange(taskId, newStartDate) {
   try {
-    console.log(`Processing start date change for task ${taskId}`);
+    console.log(`=== PROCESSING TASK ${taskId} ===`);
+    console.log(`Start date: ${newStartDate}`);
     
     // Get full task details
     const task = await getClickUpTask(taskId);
     
     // Check if task has appointment tag
     if (!hasAppointmentTag(task)) {
-      console.log('Task does not have appointment tag, skipping');
-      return;
+      console.log('❌ Task does not have appointment tag, skipping');
+      return { success: false, reason: 'No appointment tag' };
     }
+    console.log('✅ Task has appointment tag');
     
     // Find Time To Leave custom field
     const timeToLeaveFieldId = findTimeToLeaveFieldId(task);
     if (!timeToLeaveFieldId) {
-      console.log('Time To Leave custom field not found, skipping');
-      return;
+      console.log('❌ Time To Leave custom field not found, skipping');
+      return { success: false, reason: 'Time To Leave field not found' };
     }
+    console.log('✅ Found Time To Leave field');
     
     // Calculate travel time and departure time
     const travelTimeMinutes = calculateTravelTime(task);
     const startTime = new Date(parseInt(newStartDate));
     const leaveTime = new Date(startTime.getTime() - (travelTimeMinutes * 60 * 1000));
     
-    console.log(`Calculated departure time: ${leaveTime.toISOString()} (${travelTimeMinutes} minutes before ${startTime.toISOString()})`);
+    console.log(`📅 Start time: ${startTime.toISOString()} (${startTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST)`);
+    console.log(`🚗 Travel time: ${travelTimeMinutes} minutes`);
+    console.log(`⏰ Departure time: ${leaveTime.toISOString()} (${leaveTime.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'})} PST)`);
+    console.log(`📱 Timestamp to save: ${leaveTime.getTime()}`);
     
     // Update the custom field
     await updateCustomField(taskId, timeToLeaveFieldId, leaveTime.getTime());
     
     // Schedule notification
-    await sendPushCutNotification(
-      `Time to leave for ${task.name}`,
-      `You should leave now for your appointment at ${startTime.toLocaleTimeString()}`,
-      leaveTime.toISOString()
-    );
+    if (CONFIG.notifications.pushcutToken) {
+      await sendPushCutNotification(
+        `Time to leave for ${task.name}`,
+        `You should leave now for your appointment at ${startTime.toLocaleTimeString()}`,
+        leaveTime.toISOString()
+      );
+    }
     
-    console.log('Time To Leave automation completed successfully');
+    console.log('✅ Time To Leave automation completed successfully');
+    return { 
+      success: true, 
+      startTime: startTime.toISOString(),
+      leaveTime: leaveTime.toISOString(),
+      travelMinutes: travelTimeMinutes 
+    };
     
   } catch (error) {
-    console.error('Error in handleStartDateChange:', error);
-    throw error;
+    console.error('❌ Error in handleStartDateChange:', error);
+    return { success: false, error: error.message };
   }
 }
 
@@ -229,11 +264,14 @@ app.post('/clickup-webhook', async (req, res) => {
       );
       
       if (startDateChange && startDateChange.after) {
-        await handleStartDateChange(task_id, startDateChange.after);
+        const result = await handleStartDateChange(task_id, startDateChange.after);
+        res.status(200).json({ success: true, message: 'Webhook processed', result });
+      } else {
+        res.status(200).json({ success: true, message: 'No start_date change detected' });
       }
+    } else {
+      res.status(200).json({ success: true, message: 'Event not relevant' });
     }
-    
-    res.status(200).json({ success: true, message: 'Webhook processed' });
     
   } catch (error) {
     console.error('Webhook error:', error);
@@ -247,11 +285,17 @@ app.post('/clickup-webhook', async (req, res) => {
 app.post('/manual-trigger/:taskId', async (req, res) => {
   try {
     const { taskId } = req.params;
+    console.log(`=== MANUAL TRIGGER FOR TASK ${taskId} ===`);
+    
     const task = await getClickUpTask(taskId);
     
     if (task.start_date) {
-      await handleStartDateChange(taskId, task.start_date);
-      res.json({ success: true, message: 'Manual trigger completed' });
+      const result = await handleStartDateChange(taskId, task.start_date);
+      res.json({ 
+        success: true, 
+        message: 'Manual trigger completed',
+        details: result
+      });
     } else {
       res.status(400).json({ success: false, error: 'Task has no start date' });
     }
@@ -269,7 +313,8 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    service: 'ClickUp Time To Leave Automation'
+    service: 'ClickUp Time To Leave Automation',
+    version: '2.0'
   });
 });
 
