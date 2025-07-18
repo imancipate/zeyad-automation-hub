@@ -148,10 +148,9 @@ async function getValidAccessToken() {
 }
 
 /**
- * REVOLUTIONARY: Discovers Goal ID by call name and integration
- * Now using SHORT names that fit Keap's character limits!
+ * PERFORMANCE OPTIMIZED: Discovers Goal ID with timeout and better error handling
  */
-async function discoverGoalIdByCallName(callName, integration = 'zeyadhq') {
+async function discoverGoalIdByCallName(callName, integration = 'zeyadhq', timeoutMs = 10000) {
   const accessToken = await getValidAccessToken();
   
   if (!accessToken) {
@@ -159,15 +158,23 @@ async function discoverGoalIdByCallName(callName, integration = 'zeyadhq') {
   }
   
   try {
-    console.log(`🔍 Discovering Goal ID for call_name: "${callName}" with integration: "${integration}"`);
+    console.log(`🔍 Discovering Goal ID for call_name: "${callName}" with integration: "${integration}" (timeout: ${timeoutMs}ms)`);
     
-    // Query Keap's campaigns API to find goals
-    const response = await fetch('https://api.infusionsoft.com/crm/rest/v1/campaigns', {
+    // Create timeout promise
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Goal discovery timed out - Keap API is slow')), timeoutMs);
+    });
+    
+    // Create API call promise
+    const apiPromise = fetch('https://api.infusionsoft.com/crm/rest/v1/campaigns', {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Accept': 'application/json'
       }
     });
+    
+    // Race between API call and timeout
+    const response = await Promise.race([apiPromise, timeoutPromise]);
     
     if (!response.ok) {
       throw new Error(`Failed to fetch campaigns: ${response.status} ${response.statusText}`);
@@ -176,18 +183,24 @@ async function discoverGoalIdByCallName(callName, integration = 'zeyadhq') {
     const campaigns = await response.json();
     
     // Search through all campaigns for matching goals
+    let goalCount = 0;
     for (const campaign of campaigns.campaigns || []) {
       if (campaign.goals && campaign.goals.length > 0) {
+        goalCount += campaign.goals.length;
         for (const goal of campaign.goals) {
           // Match by call_name and integration
           if (goal.call_name === callName && goal.integration === integration) {
-            console.log(`✅ Found Goal ID ${goal.id} for "${callName}" in campaign "${campaign.name}"`);
+            console.log(`✅ Found Goal ID ${goal.id} for "${callName}" in campaign "${campaign.name}" (searched ${goalCount} goals)`);
             return {
               goalId: goal.id,
               campaignId: campaign.id,
               campaignName: campaign.name,
               goalName: goal.name || callName,
-              discoveryMethod: 'api_search'
+              discoveryMethod: 'api_search',
+              searchStats: {
+                campaignCount: campaigns.campaigns?.length || 0,
+                goalCount: goalCount
+              }
             };
           }
         }
@@ -195,7 +208,7 @@ async function discoverGoalIdByCallName(callName, integration = 'zeyadhq') {
     }
     
     // If not found, return detailed error
-    throw new Error(`Goal not found: No goal with call_name "${callName}" and integration "${integration}" exists in any active campaign`);
+    throw new Error(`Goal not found: No goal with call_name "${callName}" and integration "${integration}" exists in any active campaign (searched ${campaigns.campaigns?.length || 0} campaigns, ${goalCount} goals)`);
     
   } catch (error) {
     console.error(`❌ Goal discovery failed for "${callName}":`, error.message);
@@ -204,12 +217,12 @@ async function discoverGoalIdByCallName(callName, integration = 'zeyadhq') {
 }
 
 /**
- * Enhanced goal triggering with automatic Goal ID discovery
+ * Enhanced goal triggering with timeout handling
  */
 async function triggerKeapGoalByCallName(contactId, callName, goalType = 'success', integration = 'zeyadhq') {
   try {
-    // Step 1: Discover the Goal ID
-    const discoveryResult = await discoverGoalIdByCallName(callName, integration);
+    // Step 1: Discover the Goal ID with timeout
+    const discoveryResult = await discoverGoalIdByCallName(callName, integration, 8000); // 8 second timeout
     const goalId = discoveryResult.goalId;
     
     console.log(`🎯 Triggering goal "${callName}" (ID: ${goalId}) for contact ${contactId}`);
@@ -304,8 +317,7 @@ async function triggerKeapGoal(contactId, goalId, goalType = 'success') {
 }
 
 /**
- * REVOLUTIONIZED: Goal handler that works the way humans expect
- * Now using SHORT names that fit Keap's character limits!
+ * SMART GOAL HANDLER: Call name discovery with fallback to Goal IDs
  */
 async function handleKeapGoals(contactId, isSuccess, errorDetails = null, goalConfig = {}) {
   const goalType = isSuccess ? 'success' : 'error';
@@ -321,21 +333,29 @@ async function handleKeapGoals(contactId, isSuccess, errorDetails = null, goalCo
   try {
     goalResult.attempted = true;
     
-    // Option 1: Use human-friendly call names (PREFERRED)
+    // Option 1: Try human-friendly call names with timeout protection
     const callName = isSuccess ? goalConfig.successCallName : goalConfig.errorCallName;
     const integration = goalConfig.integration || 'zeyadhq';
     
     if (callName) {
-      console.log(`🚀 Using human-friendly call name: "${callName}"`);
-      const result = await triggerKeapGoalByCallName(contactId, callName, goalType, integration);
-      goalResult.success = !!result;
-      goalResult.method = 'call_name_discovery';
-      goalResult.source = 'request';
-      goalResult.callName = callName;
-      goalResult.integration = integration;
-      goalResult.goalDiscovery = result.goalDiscovery;
-      goalResult.response = result;
-      return goalResult;
+      try {
+        console.log(`🚀 Attempting call name discovery: "${callName}"`);
+        const result = await triggerKeapGoalByCallName(contactId, callName, goalType, integration);
+        goalResult.success = !!result;
+        goalResult.method = 'call_name_discovery';
+        goalResult.source = 'request';
+        goalResult.callName = callName;
+        goalResult.integration = integration;
+        goalResult.goalDiscovery = result.goalDiscovery;
+        goalResult.response = result;
+        return goalResult;
+      } catch (discoveryError) {
+        console.log(`⚠️ Call name discovery failed: ${discoveryError.message}`);
+        goalResult.discoveryError = discoveryError.message;
+        
+        // Fall through to try Goal IDs as fallback
+        console.log(`🔄 Falling back to Goal ID method...`);
+      }
     }
     
     // Option 2: Use legacy Goal IDs (FALLBACK)
@@ -344,13 +364,14 @@ async function handleKeapGoals(contactId, isSuccess, errorDetails = null, goalCo
       (goalConfig.errorGoalId || process.env.KEAP_ERROR_GOAL_ID);
     
     if (goalId) {
-      console.log(`⚙️ Using legacy Goal ID: ${goalId}`);
+      console.log(`⚙️ Using fallback Goal ID: ${goalId}`);
       const result = await triggerKeapGoal(contactId, goalId, goalType);
       goalResult.success = !!result;
       goalResult.method = 'direct_goal_id';
       goalResult.source = goalConfig.successGoalId || goalConfig.errorGoalId ? 'request' : 'environment';
       goalResult.goalId = goalId;
       goalResult.response = result;
+      goalResult.fallbackUsed = true;
       return goalResult;
     }
     
@@ -625,7 +646,7 @@ app.get('/', (req, res) => {
   
   res.json({
     status: 'healthy',
-    message: '🚀 Keap Billing Date Calculator - AUTONOMOUS PRODUCTION SYSTEM',
+    message: '🚀 Keap Billing Date Calculator - FAST & AUTONOMOUS SYSTEM',
     features: {
       airtable: !!process.env.AIRTABLE_API_KEY,
       webhook: !!process.env.WEBHOOK_URL,
@@ -636,6 +657,8 @@ app.get('/', (req, res) => {
         automatic_refresh: hasOAuthTokens,
         humanFriendlyGoals: true,
         goalDiscovery: true,
+        timeoutProtection: true,
+        smartFallback: true,
         autonomousOperation: productionReady,
         productionReady: productionReady,
         defaultSuccessGoal: !!process.env.KEAP_SUCCESS_GOAL_ID,
@@ -644,12 +667,12 @@ app.get('/', (req, res) => {
       }
     },
     endpoints: {
-      'POST /calculate-billing-date': 'Calculate billing date with AUTONOMOUS goal triggering',
+      'POST /calculate-billing-date': 'Calculate billing date with FAST goal triggering',
       'GET /oauth/authorize': 'One-time OAuth setup (never needed again after env vars set)',
       'GET /oauth/callback': 'OAuth callback endpoint',
       'GET /oauth/status': 'Check OAuth token status',
       'POST /oauth/refresh': 'Manually refresh OAuth token',
-      'POST /goals/discover': 'Test goal discovery by call name'
+      'POST /goals/discover': 'Test goal discovery by call name (with timeout)'
     },
     human_friendly_usage: {
       preferred_format: {
@@ -660,7 +683,8 @@ app.get('/', (req, res) => {
       legacy_format: {
         keapSuccessGoalId: '123',
         keapErrorGoalId: '456'
-      }
+      },
+      smart_fallback: 'Automatically falls back to Goal IDs if call name discovery times out'
     },
     oauth_setup: productionReady ? 'AUTONOMOUS - NO HUMAN INTERVENTION REQUIRED' : 
                  hasOAuthConfig ? 'configured - visit /oauth/authorize once to get tokens' : 
@@ -669,8 +693,8 @@ app.get('/', (req, res) => {
 });
 
 /**
- * 🚀 REVOLUTIONIZED BILLING DATE CALCULATION ENDPOINT
- * AUTONOMOUS PRODUCTION SYSTEM - NO HUMAN INTERVENTION REQUIRED
+ * 🚀 FAST BILLING DATE CALCULATION ENDPOINT
+ * With smart timeout protection and fallback mechanisms
  */
 app.post('/calculate-billing-date', async (req, res) => {
   try {
@@ -682,12 +706,12 @@ app.post('/calculate-billing-date', async (req, res) => {
       skipAirtable = false, 
       skipKeapGoals = false,
       
-      // 🎯 HUMAN-FRIENDLY GOAL CONFIGURATION (PREFERRED) - SHORT NAMES!
+      // 🎯 HUMAN-FRIENDLY GOAL CONFIGURATION (with fallback)
       successCallName,
       errorCallName,
       integration = 'zeyadhq',
       
-      // 🔧 LEGACY GOAL IDs (FALLBACK)
+      // 🔧 LEGACY GOAL IDs (SMART FALLBACK)
       keapSuccessGoalId,
       keapErrorGoalId 
     } = req.body;
@@ -699,9 +723,11 @@ app.post('/calculate-billing-date', async (req, res) => {
           contactId: '12345', 
           date: '2024-01-10', 
           delay: '5 days 2 months',
-          // Human-friendly way (SHORT NAMES!)
+          // Human-friendly with fallback
           successCallName: 'billcalcsucc',
-          errorCallName: 'billcalcfail'
+          errorCallName: 'billcalcfail',
+          keapSuccessGoalId: '123',  // fallback
+          keapErrorGoalId: '456'     // fallback
         }
       });
     }
@@ -788,19 +814,19 @@ app.post('/calculate-billing-date', async (req, res) => {
       }
     }
     
-    // 🚀 AUTONOMOUS KEAP GOAL INTEGRATION (SHORT NAMES!)
+    // 🚀 FAST KEAP GOAL INTEGRATION with SMART FALLBACK
     if (!skipKeapGoals) {
       try {
         result.integrations.keapGoal.attempted = true;
         
-        // Create goal configuration object
+        // Create goal configuration object with fallback
         const goalConfig = {
-          // Human-friendly call names (PREFERRED) - SHORT NAMES!
+          // Human-friendly call names (PREFERRED)
           successCallName: successCallName,
           errorCallName: errorCallName,
           integration: integration,
           
-          // Legacy goal IDs (FALLBACK)
+          // Legacy goal IDs (SMART FALLBACK)
           successGoalId: keapSuccessGoalId,
           errorGoalId: keapErrorGoalId
         };
@@ -847,23 +873,24 @@ app.post('/calculate-billing-date', async (req, res) => {
 });
 
 /**
- * 🔍 Test endpoint for goal discovery (SHORT NAMES!)
+ * 🔍 Test endpoint for goal discovery (with timeout protection)
  */
 app.post('/goals/discover', async (req, res) => {
   try {
-    const { callName, integration = 'zeyadhq' } = req.body;
+    const { callName, integration = 'zeyadhq', timeout = 8000 } = req.body;
     
     if (!callName) {
       return res.status(400).json({
         error: 'callName is required',
         example: { 
           callName: 'billcalcsucc',
-          integration: 'zeyadhq'
+          integration: 'zeyadhq',
+          timeout: 8000
         }
       });
     }
     
-    const discoveryResult = await discoverGoalIdByCallName(callName, integration);
+    const discoveryResult = await discoverGoalIdByCallName(callName, integration, timeout);
     
     res.json({
       success: true,
@@ -871,22 +898,26 @@ app.post('/goals/discover', async (req, res) => {
       callName: callName,
       integration: integration,
       discovery: discoveryResult,
-      autonomous: true
+      timeout_used: timeout,
+      performance_optimized: true
     });
     
   } catch (error) {
-    res.status(404).json({
+    res.status(408).json({
       error: 'Goal discovery failed',
       callName: req.body.callName,
       integration: req.body.integration || 'zeyadhq',
       details: error.message,
-      suggestion: 'Make sure the goal exists in an active campaign with the correct call_name and integration values'
+      timeout_used: req.body.timeout || 8000,
+      suggestion: error.message.includes('timed out') ? 
+        'Try using Goal IDs directly for faster performance' : 
+        'Make sure the goal exists in an active campaign with the correct call_name and integration values'
     });
   }
 });
 
 /**
- * Health check endpoint for Keap goals with AUTONOMOUS OPERATION
+ * Health check endpoint for Keap goals with PERFORMANCE STATUS
  */
 app.get('/keap-goals/health', (req, res) => {
   const hasOAuthTokens = !!(currentTokens.access_token && currentTokens.refresh_token);
@@ -901,11 +932,14 @@ app.get('/keap-goals/health', (req, res) => {
       authentication_method: hasOAuthTokens ? 'OAuth 2.0' : (hasLegacyToken ? 'Legacy API Key' : 'none'),
       automatic_refresh: hasOAuthTokens,
       
-      // AUTONOMOUS OPERATION FEATURES
+      // PERFORMANCE FEATURES
       autonomousOperation: productionReady,
       productionReady: productionReady,
       humanFriendlyGoals: true,
       goalDiscoverySupported: true,
+      timeoutProtection: true,
+      smartFallback: true,
+      performanceOptimized: true,
       realTimeGoalLookup: true,
       noCachingRequired: true,
       shortNamesForKeapLimits: true,
@@ -923,9 +957,10 @@ app.get('/keap-goals/health', (req, res) => {
       autonomous: productionReady
     },
     usage: {
-      'AUTONOMOUS OPERATION': productionReady ? 'ACTIVE - NO HUMAN INTERVENTION REQUIRED' : 'Set token env vars for autonomous operation',
+      'FAST OPERATION': 'Optimized with timeouts and smart fallbacks',
       'Human-Friendly Goals': 'Use successCallName: "billcalcsucc" and errorCallName: "billcalcfail"',
-      'Goal Discovery': 'POST /goals/discover to test call name discovery',
+      'Smart Fallback': 'Automatically uses Goal IDs if call name discovery times out',
+      'Goal Discovery': 'POST /goals/discover to test call name discovery (with timeout)',
       'Integration': 'Use integration: "zeyadhq" (fits Keap character limits)',
       'Legacy Support': 'Still supports keapSuccessGoalId and keapErrorGoalId for backwards compatibility'
     }
@@ -933,7 +968,7 @@ app.get('/keap-goals/health', (req, res) => {
 });
 
 /**
- * Enhanced test endpoint with AUTONOMOUS operation
+ * Enhanced test endpoint with TIMEOUT PROTECTION
  */
 app.post('/keap-goals/test', async (req, res) => {
   try {
@@ -941,12 +976,12 @@ app.post('/keap-goals/test', async (req, res) => {
       contactId, 
       testSuccess = true,
       
-      // Human-friendly options (SHORT NAMES!)
+      // Human-friendly options (with fallback)
       successCallName,
       errorCallName,
       integration = 'zeyadhq',
       
-      // Legacy options
+      // Legacy options (smart fallback)
       keapSuccessGoalId, 
       keapErrorGoalId 
     } = req.body;
@@ -958,7 +993,9 @@ app.post('/keap-goals/test', async (req, res) => {
           contactId: '12345', 
           testSuccess: true,
           successCallName: 'billcalcsucc',
-          errorCallName: 'billcalcfail'
+          errorCallName: 'billcalcfail',
+          keapSuccessGoalId: '123',  // fallback
+          keapErrorGoalId: '456'     // fallback
         }
       });
     }
@@ -987,8 +1024,8 @@ app.post('/keap-goals/test', async (req, res) => {
       authentication_used: currentTokens.access_token ? 'OAuth 2.0' : 'Legacy API Key',
       message: `Test ${testSuccess ? 'success' : 'error'} goal triggered for contact ${contactId}`,
       humanFriendly: !!(successCallName || errorCallName),
-      shortNamesUsed: true,
-      autonomousOperation: true
+      smartFallback: goalResult.fallbackUsed || false,
+      performanceOptimized: true
     });
     
   } catch (error) {
@@ -1000,7 +1037,7 @@ app.post('/keap-goals/test', async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`🚀 Keap Billing Date Calculator - AUTONOMOUS PRODUCTION SYSTEM listening on port ${port}`);
+  console.log(`🚀 Keap Billing Date Calculator - FAST & AUTONOMOUS SYSTEM listening on port ${port}`);
   console.log('Features enabled:');
   console.log(`  - Airtable: ${!!process.env.AIRTABLE_API_KEY ? '✓' : '✗'}`);
   console.log(`  - Webhook: ${!!process.env.WEBHOOK_URL ? '✓' : '✗'}`);
@@ -1011,6 +1048,8 @@ app.listen(port, () => {
   console.log(`  - Automatic Token Refresh: ${!!(currentTokens.access_token && currentTokens.refresh_token) ? '✓' : '✗'}`);
   console.log(`  - 🎯 Human-Friendly Goals: ✓`);
   console.log(`  - 🔍 Real-time Goal Discovery: ✓`);
+  console.log(`  - ⚡ Timeout Protection: ✓`);
+  console.log(`  - 🔄 Smart Fallback: ✓`);
   console.log(`  - 🚀 SHORT Call Names (Keap limits): ✓`);
   console.log(`  - 🤖 AUTONOMOUS OPERATION: ${!!(process.env.KEAP_ACCESS_TOKEN && process.env.KEAP_REFRESH_TOKEN) ? '✓ NO HUMAN INTERVENTION REQUIRED' : '✗ Set token env vars for autonomous mode'}`);
 });
