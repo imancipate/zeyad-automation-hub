@@ -132,9 +132,9 @@ async function getValidAccessToken() {
 
 /**
  * REVOLUTIONARY: Discovers Goal ID by call name and integration
- * This is what humans fucking expect to work!
+ * Now using SHORT names that fit Keap's character limits!
  */
-async function discoverGoalIdByCallName(callName, integration = 'billing-date-calculator') {
+async function discoverGoalIdByCallName(callName, integration = 'zeyadhq') {
   const accessToken = await getValidAccessToken();
   
   if (!accessToken) {
@@ -189,7 +189,7 @@ async function discoverGoalIdByCallName(callName, integration = 'billing-date-ca
 /**
  * Enhanced goal triggering with automatic Goal ID discovery
  */
-async function triggerKeapGoalByCallName(contactId, callName, goalType = 'success', integration = 'billing-date-calculator') {
+async function triggerKeapGoalByCallName(contactId, callName, goalType = 'success', integration = 'zeyadhq') {
   try {
     // Step 1: Discover the Goal ID
     const discoveryResult = await discoverGoalIdByCallName(callName, integration);
@@ -228,8 +228,8 @@ async function triggerKeapGoal(contactId, goalId, goalType = 'success') {
     const payload = {
       contact_id: parseInt(contactId),
       goal_id: parseInt(goalId),
-      call_name: `billing_calculator_${goalType}`,
-      integration: 'billing-date-calculator'
+      call_name: goalType === 'success' ? 'billcalcsucc' : 'billcalcfail',
+      integration: 'zeyadhq'
     };
     
     console.log(`Triggering Keap ${goalType} goal ${goalId} for contact ${contactId}`);
@@ -288,7 +288,7 @@ async function triggerKeapGoal(contactId, goalId, goalType = 'success') {
 
 /**
  * REVOLUTIONIZED: Goal handler that works the way humans expect
- * Accepts either Goal IDs (legacy) or Call Names (human-friendly)
+ * Now using SHORT names that fit Keap's character limits!
  */
 async function handleKeapGoals(contactId, isSuccess, errorDetails = null, goalConfig = {}) {
   const goalType = isSuccess ? 'success' : 'error';
@@ -306,7 +306,7 @@ async function handleKeapGoals(contactId, isSuccess, errorDetails = null, goalCo
     
     // Option 1: Use human-friendly call names (PREFERRED)
     const callName = isSuccess ? goalConfig.successCallName : goalConfig.errorCallName;
-    const integration = goalConfig.integration || 'billing-date-calculator';
+    const integration = goalConfig.integration || 'zeyadhq';
     
     if (callName) {
       console.log(`🚀 Using human-friendly call name: "${callName}"`);
@@ -630,9 +630,9 @@ app.get('/', (req, res) => {
     },
     human_friendly_usage: {
       preferred_format: {
-        successCallName: 'billing_calculator_success',
-        errorCallName: 'billing_calculator_error',
-        integration: 'billing-date-calculator'
+        successCallName: 'billcalcsucc',
+        errorCallName: 'billcalcfail',
+        integration: 'zeyadhq'
       },
       legacy_format: {
         keapSuccessGoalId: '123',
@@ -645,7 +645,7 @@ app.get('/', (req, res) => {
 
 /**
  * 🚀 REVOLUTIONIZED BILLING DATE CALCULATION ENDPOINT
- * Now supports human-friendly goal call names!
+ * Now with SHORT goal names that fit Keap's character limits!
  */
 app.post('/calculate-billing-date', async (req, res) => {
   try {
@@ -657,10 +657,10 @@ app.post('/calculate-billing-date', async (req, res) => {
       skipAirtable = false, 
       skipKeapGoals = false,
       
-      // 🎯 HUMAN-FRIENDLY GOAL CONFIGURATION (PREFERRED)
+      // 🎯 HUMAN-FRIENDLY GOAL CONFIGURATION (PREFERRED) - SHORT NAMES!
       successCallName,
       errorCallName,
-      integration = 'billing-date-calculator',
+      integration = 'zeyadhq',
       
       // 🔧 LEGACY GOAL IDs (FALLBACK)
       keapSuccessGoalId,
@@ -674,9 +674,9 @@ app.post('/calculate-billing-date', async (req, res) => {
           contactId: '12345', 
           date: '2024-01-10', 
           delay: '5 days 2 months',
-          // Human-friendly way
-          successCallName: 'billing_calculator_success',
-          errorCallName: 'billing_calculator_error'
+          // Human-friendly way (SHORT NAMES!)
+          successCallName: 'billcalcsucc',
+          errorCallName: 'billcalcfail'
         }
       });
     }
@@ -688,8 +688,8 @@ app.post('/calculate-billing-date', async (req, res) => {
           contactId: '12345', 
           date: '2024-01-10', 
           delay: '5 days 2 months',
-          successCallName: 'billing_calculator_success',
-          errorCallName: 'billing_calculator_error'
+          successCallName: 'billcalcsucc',
+          errorCallName: 'billcalcfail'
         }
       });
     }
@@ -763,14 +763,14 @@ app.post('/calculate-billing-date', async (req, res) => {
       }
     }
     
-    // 🚀 HUMAN-FRIENDLY KEAP GOAL INTEGRATION
+    // 🚀 HUMAN-FRIENDLY KEAP GOAL INTEGRATION (SHORT NAMES!)
     if (!skipKeapGoals) {
       try {
         result.integrations.keapGoal.attempted = true;
         
         // Create goal configuration object
         const goalConfig = {
-          // Human-friendly call names (PREFERRED)
+          // Human-friendly call names (PREFERRED) - SHORT NAMES!
           successCallName: successCallName,
           errorCallName: errorCallName,
           integration: integration,
@@ -806,7 +806,7 @@ app.post('/calculate-billing-date', async (req, res) => {
         const goalConfig = { 
           errorCallName: errorCallName,
           errorGoalId: keapErrorGoalId,
-          integration: integration || 'billing-date-calculator'
+          integration: integration || 'zeyadhq'
         };
         await handleKeapGoals(contactId, false, error.message, goalConfig);
       } catch (goalError) {
@@ -822,18 +822,18 @@ app.post('/calculate-billing-date', async (req, res) => {
 });
 
 /**
- * 🔍 Test endpoint for goal discovery
+ * 🔍 Test endpoint for goal discovery (SHORT NAMES!)
  */
 app.post('/goals/discover', async (req, res) => {
   try {
-    const { callName, integration = 'billing-date-calculator' } = req.body;
+    const { callName, integration = 'zeyadhq' } = req.body;
     
     if (!callName) {
       return res.status(400).json({
         error: 'callName is required',
         example: { 
-          callName: 'billing_calculator_success',
-          integration: 'billing-date-calculator'
+          callName: 'billcalcsucc',
+          integration: 'zeyadhq'
         }
       });
     }
@@ -852,7 +852,7 @@ app.post('/goals/discover', async (req, res) => {
     res.status(404).json({
       error: 'Goal discovery failed',
       callName: req.body.callName,
-      integration: req.body.integration || 'billing-date-calculator',
+      integration: req.body.integration || 'zeyadhq',
       details: error.message,
       suggestion: 'Make sure the goal exists in an active campaign with the correct call_name and integration values'
     });
@@ -879,6 +879,7 @@ app.get('/keap-goals/health', (req, res) => {
       goalDiscoverySupported: true,
       realTimeGoalLookup: true,
       noCachingRequired: true,
+      shortNamesForKeapLimits: true,
       
       defaultSuccessGoalId: process.env.KEAP_SUCCESS_GOAL_ID || 'not configured',
       defaultErrorGoalId: process.env.KEAP_ERROR_GOAL_ID || 'not configured',
@@ -892,15 +893,16 @@ app.get('/keap-goals/health', (req, res) => {
     },
     usage: {
       'OAuth Setup': 'Visit /oauth/authorize to get OAuth tokens',
-      'Human-Friendly Goals': 'Use successCallName and errorCallName in requests',
+      'Human-Friendly Goals': 'Use successCallName: "billcalcsucc" and errorCallName: "billcalcfail"',
       'Goal Discovery': 'POST /goals/discover to test call name discovery',
+      'Integration': 'Use integration: "zeyadhq" (fits Keap character limits)',
       'Legacy Support': 'Still supports keapSuccessGoalId and keapErrorGoalId for backwards compatibility'
     }
   });
 });
 
 /**
- * Enhanced test endpoint with human-friendly goal support
+ * Enhanced test endpoint with human-friendly goal support (SHORT NAMES!)
  */
 app.post('/keap-goals/test', async (req, res) => {
   try {
@@ -908,10 +910,10 @@ app.post('/keap-goals/test', async (req, res) => {
       contactId, 
       testSuccess = true,
       
-      // Human-friendly options
+      // Human-friendly options (SHORT NAMES!)
       successCallName,
       errorCallName,
-      integration = 'billing-date-calculator',
+      integration = 'zeyadhq',
       
       // Legacy options
       keapSuccessGoalId, 
@@ -924,8 +926,8 @@ app.post('/keap-goals/test', async (req, res) => {
         example: { 
           contactId: '12345', 
           testSuccess: true,
-          successCallName: 'billing_calculator_success',
-          errorCallName: 'billing_calculator_error'
+          successCallName: 'billcalcsucc',
+          errorCallName: 'billcalcfail'
         }
       });
     }
@@ -953,7 +955,8 @@ app.post('/keap-goals/test', async (req, res) => {
       goalResult: goalResult,
       authentication_used: currentTokens.access_token ? 'OAuth 2.0' : 'Legacy API Key',
       message: `Test ${testSuccess ? 'success' : 'error'} goal triggered for contact ${contactId}`,
-      humanFriendly: !!(successCallName || errorCallName)
+      humanFriendly: !!(successCallName || errorCallName),
+      shortNamesUsed: true
     });
     
   } catch (error) {
@@ -975,7 +978,7 @@ app.listen(port, () => {
   console.log(`  - Automatic Token Refresh: ${!!(currentTokens.access_token && currentTokens.refresh_token) ? '✓' : '✗'}`);
   console.log(`  - 🎯 Human-Friendly Goals: ✓`);
   console.log(`  - 🔍 Real-time Goal Discovery: ✓`);
-  console.log(`  - 🚀 Call Name Support: ✓`);
+  console.log(`  - 🚀 SHORT Call Names (Keap limits): ✓`);
 });
 
 module.exports = app;
