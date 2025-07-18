@@ -1,0 +1,25 @@
+runtime: nodejs18
+
+env_variables:
+  NODE_ENV: production
+  # Airtable Configuration - Your CRM Base
+  AIRTABLE_API_KEY: "your_airtable_api_key_here"
+  AIRTABLE_BASE_ID: "appy2LhAq03EfacUM"
+  AIRTABLE_TABLE_NAME: "Script Results"
+  AIRTABLE_UPDATE_MODE: "update"  # "update" = update existing record, "create" = always create new
+  
+  # Webhook Configuration (for updating Keap contacts)
+  WEBHOOK_URL: "https://hooks.zapier.com/hooks/catch/112942/u2eqh2p/"
+  # WEBHOOK_SECRET: "optional_secret_here"
+
+automatic_scaling:
+  min_instances: 0
+  max_instances: 10
+  
+resources:
+  cpu: 1
+  memory_gb: 0.5
+
+handlers:
+- url: /.*
+  script: auto
