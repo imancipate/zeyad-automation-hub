@@ -52,6 +52,94 @@ function parseDelay(delayStr) {
   return { days, months };
 }
 
+/**
+ * Triggers a goal in Keap for the specified contact
+ */
+async function triggerKeapGoal(contactId, goalId, goalType = 'success') {
+  const KEAP_API_TOKEN = process.env.KEAP_API_TOKEN;
+  
+  if (!KEAP_API_TOKEN || !goalId) {
+    console.log(`Keap goal triggering not configured for ${goalType} goal, skipping`);
+    return null;
+  }
+  
+  try {
+    const payload = {
+      contact_id: parseInt(contactId),
+      goal_id: parseInt(goalId),
+      call_name: `billing_calculator_${goalType}`,
+      integration: 'billing-date-calculator'
+    };
+    
+    console.log(`Triggering Keap ${goalType} goal ${goalId} for contact ${contactId}`);
+    
+    const response = await fetch('https://api.infusionsoft.com/crm/rest/v1/campaigns/goals', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${KEAP_API_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Keap API error (${response.status}): ${errorText}`);
+    }
+    
+    const result = await response.json();
+    console.log(`Successfully triggered Keap ${goalType} goal for contact ${contactId}`);
+    return result;
+    
+  } catch (error) {
+    console.error(`Error triggering Keap ${goalType} goal:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Handles goal triggering based on calculation success/failure
+ */
+async function handleKeapGoals(contactId, isSuccess, errorDetails = null) {
+  const KEAP_SUCCESS_GOAL_ID = process.env.KEAP_SUCCESS_GOAL_ID;
+  const KEAP_ERROR_GOAL_ID = process.env.KEAP_ERROR_GOAL_ID;
+  
+  const goalResult = {
+    attempted: false,
+    success: false,
+    goalType: isSuccess ? 'success' : 'error',
+    goalId: isSuccess ? KEAP_SUCCESS_GOAL_ID : KEAP_ERROR_GOAL_ID
+  };
+  
+  const goalId = isSuccess ? KEAP_SUCCESS_GOAL_ID : KEAP_ERROR_GOAL_ID;
+  
+  if (!goalId) {
+    goalResult.skipped = true;
+    goalResult.reason = `No ${goalResult.goalType} goal ID configured`;
+    return goalResult;
+  }
+  
+  try {
+    goalResult.attempted = true;
+    const result = await triggerKeapGoal(contactId, goalId, goalResult.goalType);
+    goalResult.success = !!result;
+    
+    if (result) {
+      goalResult.response = result;
+    }
+    
+    if (errorDetails && !isSuccess) {
+      goalResult.originalError = errorDetails;
+    }
+    
+  } catch (error) {
+    goalResult.error = error.message;
+  }
+  
+  return goalResult;
+}
+
 async function storeInAirtable(contactId, originalDate, calculatedDate, delay) {
   const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
   const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
@@ -155,21 +243,38 @@ async function sendToWebhook(contactId, calculatedDate, originalData) {
 app.get('/', (req, res) => {
   res.json({
     status: 'healthy',
-    message: 'Keap Billing Date Calculator with Airtable & Webhook Integration',
+    message: 'Keap Billing Date Calculator with Airtable, Webhook & Goal Integration',
     features: {
       airtable: !!process.env.AIRTABLE_API_KEY,
-      webhook: !!process.env.WEBHOOK_URL
+      webhook: !!process.env.WEBHOOK_URL,
+      keapGoals: {
+        enabled: !!process.env.KEAP_API_TOKEN,
+        successGoal: !!process.env.KEAP_SUCCESS_GOAL_ID,
+        errorGoal: !!process.env.KEAP_ERROR_GOAL_ID
+      }
     },
     endpoints: {
-      'POST /calculate-billing-date': 'Calculate billing date, store in Airtable, and call webhook',
+      'POST /calculate-billing-date': 'Calculate billing date, store in Airtable, call webhook, and trigger Keap goals',
       'GET /billing-date/:contactId': 'Get stored billing date from Airtable'
+    },
+    environment: {
+      KEAP_API_TOKEN: process.env.KEAP_API_TOKEN ? 'configured' : 'missing',
+      KEAP_SUCCESS_GOAL_ID: process.env.KEAP_SUCCESS_GOAL_ID ? 'configured' : 'missing',
+      KEAP_ERROR_GOAL_ID: process.env.KEAP_ERROR_GOAL_ID ? 'configured' : 'missing'
     }
   });
 });
 
 app.post('/calculate-billing-date', async (req, res) => {
   try {
-    const { contactId, date, delay, skipWebhook = false, skipAirtable = false } = req.body;
+    const { 
+      contactId, 
+      date, 
+      delay, 
+      skipWebhook = false, 
+      skipAirtable = false, 
+      skipKeapGoals = false 
+    } = req.body;
     
     if (!contactId) {
       return res.status(400).json({
@@ -211,10 +316,15 @@ app.post('/calculate-billing-date', async (req, res) => {
       message: `Billing date calculated for contact ${contactId}`,
       integrations: {
         airtable: { attempted: false, success: false },
-        webhook: { attempted: false, success: false }
+        webhook: { attempted: false, success: false },
+        keapGoal: { attempted: false, success: false }
       }
     };
     
+    // Track integration errors for goal triggering
+    const integrationErrors = [];
+    
+    // Airtable integration
     if (!skipAirtable) {
       try {
         result.integrations.airtable.attempted = true;
@@ -230,9 +340,11 @@ app.post('/calculate-billing-date', async (req, res) => {
         }
       } catch (error) {
         result.integrations.airtable.error = error.message;
+        integrationErrors.push(`Airtable: ${error.message}`);
       }
     }
     
+    // Webhook integration
     if (!skipWebhook) {
       try {
         result.integrations.webhook.attempted = true;
@@ -243,12 +355,43 @@ app.post('/calculate-billing-date', async (req, res) => {
         }
       } catch (error) {
         result.integrations.webhook.error = error.message;
+        integrationErrors.push(`Webhook: ${error.message}`);
+      }
+    }
+    
+    // Keap Goal integration
+    if (!skipKeapGoals) {
+      try {
+        result.integrations.keapGoal.attempted = true;
+        
+        // Determine success/failure based on main calculation and critical integrations
+        const hasIntegrationFailures = integrationErrors.length > 0;
+        const goalResult = await handleKeapGoals(
+          contactId, 
+          !hasIntegrationFailures, 
+          hasIntegrationFailures ? integrationErrors.join('; ') : null
+        );
+        
+        result.integrations.keapGoal = goalResult;
+        
+      } catch (error) {
+        result.integrations.keapGoal.error = error.message;
       }
     }
     
     res.json(result);
     
   } catch (error) {
+    // Trigger error goal for calculation failures
+    const { contactId } = req.body;
+    if (contactId && !req.body.skipKeapGoals) {
+      try {
+        await handleKeapGoals(contactId, false, error.message);
+      } catch (goalError) {
+        console.error('Failed to trigger error goal:', goalError);
+      }
+    }
+    
     res.status(500).json({
       error: 'Internal server error',
       details: error.message
@@ -256,8 +399,74 @@ app.post('/calculate-billing-date', async (req, res) => {
   }
 });
 
+/**
+ * Health check endpoint for Keap goals specifically
+ */
+app.get('/keap-goals/health', (req, res) => {
+  const KEAP_API_TOKEN = process.env.KEAP_API_TOKEN;
+  const KEAP_SUCCESS_GOAL_ID = process.env.KEAP_SUCCESS_GOAL_ID;
+  const KEAP_ERROR_GOAL_ID = process.env.KEAP_ERROR_GOAL_ID;
+  
+  res.json({
+    keapGoalIntegration: {
+      status: KEAP_API_TOKEN ? 'configured' : 'not configured',
+      apiToken: KEAP_API_TOKEN ? 'present' : 'missing',
+      successGoalId: KEAP_SUCCESS_GOAL_ID || 'not configured',
+      errorGoalId: KEAP_ERROR_GOAL_ID || 'not configured',
+      ready: !!(KEAP_API_TOKEN && (KEAP_SUCCESS_GOAL_ID || KEAP_ERROR_GOAL_ID))
+    },
+    endpoints: {
+      'POST /keap-goals/test': 'Test goal triggering with sample data'
+    }
+  });
+});
+
+/**
+ * Test endpoint for Keap goal integration
+ */
+app.post('/keap-goals/test', async (req, res) => {
+  try {
+    const { contactId, testSuccess = true } = req.body;
+    
+    if (!contactId) {
+      return res.status(400).json({
+        error: 'contactId is required for testing',
+        example: { contactId: '12345', testSuccess: true }
+      });
+    }
+    
+    const goalResult = await handleKeapGoals(
+      contactId, 
+      testSuccess, 
+      testSuccess ? null : 'Test error scenario'
+    );
+    
+    res.json({
+      success: true,
+      testType: testSuccess ? 'success' : 'error',
+      contactId: contactId,
+      goalResult: goalResult,
+      message: `Test ${testSuccess ? 'success' : 'error'} goal triggered for contact ${contactId}`
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      error: 'Test failed',
+      details: error.message
+    });
+  }
+});
+
 app.listen(port, () => {
-  console.log(`Keap Billing Date Calculator with Airtable & Webhook Integration listening on port ${port}`);
+  console.log(`Keap Billing Date Calculator with Full Integration listening on port ${port}`);
+  console.log('Features enabled:');
+  console.log(`  - Airtable: ${!!process.env.AIRTABLE_API_KEY ? '✓' : '✗'}`);
+  console.log(`  - Webhook: ${!!process.env.WEBHOOK_URL ? '✓' : '✗'}`);
+  console.log(`  - Keap Goals: ${!!process.env.KEAP_API_TOKEN ? '✓' : '✗'}`);
+  if (process.env.KEAP_API_TOKEN) {
+    console.log(`    - Success Goal ID: ${process.env.KEAP_SUCCESS_GOAL_ID || 'not configured'}`);
+    console.log(`    - Error Goal ID: ${process.env.KEAP_ERROR_GOAL_ID || 'not configured'}`);
+  }
 });
 
 module.exports = app;
