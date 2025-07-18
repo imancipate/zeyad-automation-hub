@@ -131,7 +131,90 @@ async function getValidAccessToken() {
 }
 
 /**
- * Triggers a goal in Keap for the specified contact with automatic token management
+ * REVOLUTIONARY: Discovers Goal ID by call name and integration
+ * This is what humans fucking expect to work!
+ */
+async function discoverGoalIdByCallName(callName, integration = 'billing-date-calculator') {
+  const accessToken = await getValidAccessToken();
+  
+  if (!accessToken) {
+    throw new Error('No access token available for goal discovery');
+  }
+  
+  try {
+    console.log(`🔍 Discovering Goal ID for call_name: "${callName}" with integration: "${integration}"`);
+    
+    // Query Keap's campaigns API to find goals
+    const response = await fetch('https://api.infusionsoft.com/crm/rest/v1/campaigns', {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Accept': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch campaigns: ${response.status} ${response.statusText}`);
+    }
+    
+    const campaigns = await response.json();
+    
+    // Search through all campaigns for matching goals
+    for (const campaign of campaigns.campaigns || []) {
+      if (campaign.goals && campaign.goals.length > 0) {
+        for (const goal of campaign.goals) {
+          // Match by call_name and integration
+          if (goal.call_name === callName && goal.integration === integration) {
+            console.log(`✅ Found Goal ID ${goal.id} for "${callName}" in campaign "${campaign.name}"`);
+            return {
+              goalId: goal.id,
+              campaignId: campaign.id,
+              campaignName: campaign.name,
+              goalName: goal.name || callName,
+              discoveryMethod: 'api_search'
+            };
+          }
+        }
+      }
+    }
+    
+    // If not found, return detailed error
+    throw new Error(`Goal not found: No goal with call_name "${callName}" and integration "${integration}" exists in any active campaign`);
+    
+  } catch (error) {
+    console.error(`❌ Goal discovery failed for "${callName}":`, error.message);
+    throw error;
+  }
+}
+
+/**
+ * Enhanced goal triggering with automatic Goal ID discovery
+ */
+async function triggerKeapGoalByCallName(contactId, callName, goalType = 'success', integration = 'billing-date-calculator') {
+  try {
+    // Step 1: Discover the Goal ID
+    const discoveryResult = await discoverGoalIdByCallName(callName, integration);
+    const goalId = discoveryResult.goalId;
+    
+    console.log(`🎯 Triggering goal "${callName}" (ID: ${goalId}) for contact ${contactId}`);
+    
+    // Step 2: Trigger the goal using the discovered ID
+    const result = await triggerKeapGoal(contactId, goalId, goalType);
+    
+    return {
+      ...result,
+      goalDiscovery: discoveryResult,
+      callName: callName,
+      integration: integration
+    };
+    
+  } catch (error) {
+    console.error(`Failed to trigger goal by call name "${callName}":`, error);
+    throw error;
+  }
+}
+
+/**
+ * Original goal triggering function (still used internally)
  */
 async function triggerKeapGoal(contactId, goalId, goalType = 'success') {
   const accessToken = await getValidAccessToken();
@@ -204,48 +287,65 @@ async function triggerKeapGoal(contactId, goalId, goalType = 'success') {
 }
 
 /**
- * Handles goal triggering based on calculation success/failure
- * Enhanced to support dynamic goal IDs from request or environment variables
+ * REVOLUTIONIZED: Goal handler that works the way humans expect
+ * Accepts either Goal IDs (legacy) or Call Names (human-friendly)
  */
-async function handleKeapGoals(contactId, isSuccess, errorDetails = null, customGoalIds = {}) {
-  // Priority: Custom goal IDs from request > Environment variables > Skip
-  const KEAP_SUCCESS_GOAL_ID = customGoalIds.successGoalId || process.env.KEAP_SUCCESS_GOAL_ID;
-  const KEAP_ERROR_GOAL_ID = customGoalIds.errorGoalId || process.env.KEAP_ERROR_GOAL_ID;
+async function handleKeapGoals(contactId, isSuccess, errorDetails = null, goalConfig = {}) {
+  const goalType = isSuccess ? 'success' : 'error';
   
   const goalResult = {
     attempted: false,
     success: false,
-    goalType: isSuccess ? 'success' : 'error',
-    goalId: isSuccess ? KEAP_SUCCESS_GOAL_ID : KEAP_ERROR_GOAL_ID,
-    source: customGoalIds.successGoalId || customGoalIds.errorGoalId ? 'request' : 'environment'
+    goalType: goalType,
+    method: 'unknown',
+    source: 'unknown'
   };
-  
-  const goalId = isSuccess ? KEAP_SUCCESS_GOAL_ID : KEAP_ERROR_GOAL_ID;
-  
-  if (!goalId) {
-    goalResult.skipped = true;
-    goalResult.reason = `No ${goalResult.goalType} goal ID configured`;
-    return goalResult;
-  }
   
   try {
     goalResult.attempted = true;
-    const result = await triggerKeapGoal(contactId, goalId, goalResult.goalType);
-    goalResult.success = !!result;
     
-    if (result) {
+    // Option 1: Use human-friendly call names (PREFERRED)
+    const callName = isSuccess ? goalConfig.successCallName : goalConfig.errorCallName;
+    const integration = goalConfig.integration || 'billing-date-calculator';
+    
+    if (callName) {
+      console.log(`🚀 Using human-friendly call name: "${callName}"`);
+      const result = await triggerKeapGoalByCallName(contactId, callName, goalType, integration);
+      goalResult.success = !!result;
+      goalResult.method = 'call_name_discovery';
+      goalResult.source = 'request';
+      goalResult.callName = callName;
+      goalResult.integration = integration;
+      goalResult.goalDiscovery = result.goalDiscovery;
       goalResult.response = result;
+      return goalResult;
     }
     
-    if (errorDetails && !isSuccess) {
-      goalResult.originalError = errorDetails;
+    // Option 2: Use legacy Goal IDs (FALLBACK)
+    const goalId = isSuccess ? 
+      (goalConfig.successGoalId || process.env.KEAP_SUCCESS_GOAL_ID) : 
+      (goalConfig.errorGoalId || process.env.KEAP_ERROR_GOAL_ID);
+    
+    if (goalId) {
+      console.log(`⚙️ Using legacy Goal ID: ${goalId}`);
+      const result = await triggerKeapGoal(contactId, goalId, goalType);
+      goalResult.success = !!result;
+      goalResult.method = 'direct_goal_id';
+      goalResult.source = goalConfig.successGoalId || goalConfig.errorGoalId ? 'request' : 'environment';
+      goalResult.goalId = goalId;
+      goalResult.response = result;
+      return goalResult;
     }
+    
+    // Option 3: No goal configuration found
+    goalResult.skipped = true;
+    goalResult.reason = `No ${goalType} goal configured (neither call name nor goal ID provided)`;
+    return goalResult;
     
   } catch (error) {
     goalResult.error = error.message;
+    return goalResult;
   }
-  
-  return goalResult;
 }
 
 async function storeInAirtable(contactId, originalDate, calculatedDate, delay) {
@@ -504,7 +604,7 @@ app.get('/', (req, res) => {
   
   res.json({
     status: 'healthy',
-    message: 'Keap Billing Date Calculator with OAuth 2.0 & Dynamic Goal Integration',
+    message: '🚀 Keap Billing Date Calculator with HUMAN-FRIENDLY Goal Integration',
     features: {
       airtable: !!process.env.AIRTABLE_API_KEY,
       webhook: !!process.env.WEBHOOK_URL,
@@ -513,22 +613,40 @@ app.get('/', (req, res) => {
         oauth_configured: hasOAuthConfig,
         oauth_tokens: hasOAuthTokens,
         automatic_refresh: hasOAuthTokens,
+        humanFriendlyGoals: true,
+        goalDiscovery: true,
         defaultSuccessGoal: !!process.env.KEAP_SUCCESS_GOAL_ID,
         defaultErrorGoal: !!process.env.KEAP_ERROR_GOAL_ID,
         dynamicGoals: true
       }
     },
     endpoints: {
-      'POST /calculate-billing-date': 'Calculate billing date with automatic OAuth token management',
+      'POST /calculate-billing-date': 'Calculate billing date with HUMAN-FRIENDLY goal triggering',
       'GET /oauth/authorize': 'Start OAuth authorization flow',
       'GET /oauth/callback': 'OAuth callback endpoint',
       'GET /oauth/status': 'Check OAuth token status',
-      'POST /oauth/refresh': 'Manually refresh OAuth token'
+      'POST /oauth/refresh': 'Manually refresh OAuth token',
+      'POST /goals/discover': 'Test goal discovery by call name'
+    },
+    human_friendly_usage: {
+      preferred_format: {
+        successCallName: 'billing_calculator_success',
+        errorCallName: 'billing_calculator_error',
+        integration: 'billing-date-calculator'
+      },
+      legacy_format: {
+        keapSuccessGoalId: '123',
+        keapErrorGoalId: '456'
+      }
     },
     oauth_setup: hasOAuthConfig ? 'configured' : 'Go to /oauth/authorize to start OAuth flow'
   });
 });
 
+/**
+ * 🚀 REVOLUTIONIZED BILLING DATE CALCULATION ENDPOINT
+ * Now supports human-friendly goal call names!
+ */
 app.post('/calculate-billing-date', async (req, res) => {
   try {
     const { 
@@ -538,7 +656,13 @@ app.post('/calculate-billing-date', async (req, res) => {
       skipWebhook = false, 
       skipAirtable = false, 
       skipKeapGoals = false,
-      // Dynamic goal IDs
+      
+      // 🎯 HUMAN-FRIENDLY GOAL CONFIGURATION (PREFERRED)
+      successCallName,
+      errorCallName,
+      integration = 'billing-date-calculator',
+      
+      // 🔧 LEGACY GOAL IDs (FALLBACK)
       keapSuccessGoalId,
       keapErrorGoalId 
     } = req.body;
@@ -550,8 +674,9 @@ app.post('/calculate-billing-date', async (req, res) => {
           contactId: '12345', 
           date: '2024-01-10', 
           delay: '5 days 2 months',
-          keapSuccessGoalId: '123',
-          keapErrorGoalId: '456'
+          // Human-friendly way
+          successCallName: 'billing_calculator_success',
+          errorCallName: 'billing_calculator_error'
         }
       });
     }
@@ -563,8 +688,8 @@ app.post('/calculate-billing-date', async (req, res) => {
           contactId: '12345', 
           date: '2024-01-10', 
           delay: '5 days 2 months',
-          keapSuccessGoalId: '123',
-          keapErrorGoalId: '456'
+          successCallName: 'billing_calculator_success',
+          errorCallName: 'billing_calculator_error'
         }
       });
     }
@@ -638,13 +763,19 @@ app.post('/calculate-billing-date', async (req, res) => {
       }
     }
     
-    // Keap Goal integration with automatic OAuth token management
+    // 🚀 HUMAN-FRIENDLY KEAP GOAL INTEGRATION
     if (!skipKeapGoals) {
       try {
         result.integrations.keapGoal.attempted = true;
         
-        // Pass custom goal IDs to the handler
-        const customGoalIds = {
+        // Create goal configuration object
+        const goalConfig = {
+          // Human-friendly call names (PREFERRED)
+          successCallName: successCallName,
+          errorCallName: errorCallName,
+          integration: integration,
+          
+          // Legacy goal IDs (FALLBACK)
           successGoalId: keapSuccessGoalId,
           errorGoalId: keapErrorGoalId
         };
@@ -655,7 +786,7 @@ app.post('/calculate-billing-date', async (req, res) => {
           contactId, 
           !hasIntegrationFailures, 
           hasIntegrationFailures ? integrationErrors.join('; ') : null,
-          customGoalIds
+          goalConfig
         );
         
         result.integrations.keapGoal = goalResult;
@@ -669,11 +800,15 @@ app.post('/calculate-billing-date', async (req, res) => {
     
   } catch (error) {
     // Trigger error goal for calculation failures
-    const { contactId, keapErrorGoalId } = req.body;
+    const { contactId, errorCallName, keapErrorGoalId, integration } = req.body;
     if (contactId && !req.body.skipKeapGoals) {
       try {
-        const customGoalIds = { errorGoalId: keapErrorGoalId };
-        await handleKeapGoals(contactId, false, error.message, customGoalIds);
+        const goalConfig = { 
+          errorCallName: errorCallName,
+          errorGoalId: keapErrorGoalId,
+          integration: integration || 'billing-date-calculator'
+        };
+        await handleKeapGoals(contactId, false, error.message, goalConfig);
       } catch (goalError) {
         console.error('Failed to trigger error goal:', goalError);
       }
@@ -687,7 +822,45 @@ app.post('/calculate-billing-date', async (req, res) => {
 });
 
 /**
- * Health check endpoint for Keap goals with OAuth status
+ * 🔍 Test endpoint for goal discovery
+ */
+app.post('/goals/discover', async (req, res) => {
+  try {
+    const { callName, integration = 'billing-date-calculator' } = req.body;
+    
+    if (!callName) {
+      return res.status(400).json({
+        error: 'callName is required',
+        example: { 
+          callName: 'billing_calculator_success',
+          integration: 'billing-date-calculator'
+        }
+      });
+    }
+    
+    const discoveryResult = await discoverGoalIdByCallName(callName, integration);
+    
+    res.json({
+      success: true,
+      message: `Goal discovered successfully`,
+      callName: callName,
+      integration: integration,
+      discovery: discoveryResult
+    });
+    
+  } catch (error) {
+    res.status(404).json({
+      error: 'Goal discovery failed',
+      callName: req.body.callName,
+      integration: req.body.integration || 'billing-date-calculator',
+      details: error.message,
+      suggestion: 'Make sure the goal exists in an active campaign with the correct call_name and integration values'
+    });
+  }
+});
+
+/**
+ * Health check endpoint for Keap goals with enhanced human-friendly features
  */
 app.get('/keap-goals/health', (req, res) => {
   const hasOAuthTokens = !!(currentTokens.access_token && currentTokens.refresh_token);
@@ -700,6 +873,13 @@ app.get('/keap-goals/health', (req, res) => {
       legacy_token: hasLegacyToken ? 'present' : 'missing',
       authentication_method: hasOAuthTokens ? 'OAuth 2.0' : (hasLegacyToken ? 'Legacy API Key' : 'none'),
       automatic_refresh: hasOAuthTokens,
+      
+      // ENHANCED FEATURES
+      humanFriendlyGoals: true,
+      goalDiscoverySupported: true,
+      realTimeGoalLookup: true,
+      noCachingRequired: true,
+      
       defaultSuccessGoalId: process.env.KEAP_SUCCESS_GOAL_ID || 'not configured',
       defaultErrorGoalId: process.env.KEAP_ERROR_GOAL_ID || 'not configured',
       dynamicGoalsSupported: true,
@@ -712,20 +892,28 @@ app.get('/keap-goals/health', (req, res) => {
     },
     usage: {
       'OAuth Setup': 'Visit /oauth/authorize to get OAuth tokens',
-      'Default Goals': 'Set KEAP_SUCCESS_GOAL_ID and KEAP_ERROR_GOAL_ID environment variables',
-      'Dynamic Goals': 'Pass keapSuccessGoalId and keapErrorGoalId in request body'
+      'Human-Friendly Goals': 'Use successCallName and errorCallName in requests',
+      'Goal Discovery': 'POST /goals/discover to test call name discovery',
+      'Legacy Support': 'Still supports keapSuccessGoalId and keapErrorGoalId for backwards compatibility'
     }
   });
 });
 
 /**
- * Test endpoint for Keap goal integration with OAuth
+ * Enhanced test endpoint with human-friendly goal support
  */
 app.post('/keap-goals/test', async (req, res) => {
   try {
     const { 
       contactId, 
-      testSuccess = true, 
+      testSuccess = true,
+      
+      // Human-friendly options
+      successCallName,
+      errorCallName,
+      integration = 'billing-date-calculator',
+      
+      // Legacy options
       keapSuccessGoalId, 
       keapErrorGoalId 
     } = req.body;
@@ -736,13 +924,16 @@ app.post('/keap-goals/test', async (req, res) => {
         example: { 
           contactId: '12345', 
           testSuccess: true,
-          keapSuccessGoalId: '123',
-          keapErrorGoalId: '456'
+          successCallName: 'billing_calculator_success',
+          errorCallName: 'billing_calculator_error'
         }
       });
     }
     
-    const customGoalIds = {
+    const goalConfig = {
+      successCallName: successCallName,
+      errorCallName: errorCallName,
+      integration: integration,
       successGoalId: keapSuccessGoalId,
       errorGoalId: keapErrorGoalId
     };
@@ -751,17 +942,18 @@ app.post('/keap-goals/test', async (req, res) => {
       contactId, 
       testSuccess, 
       testSuccess ? null : 'Test error scenario',
-      customGoalIds
+      goalConfig
     );
     
     res.json({
       success: true,
       testType: testSuccess ? 'success' : 'error',
       contactId: contactId,
+      goalConfig: goalConfig,
       goalResult: goalResult,
-      customGoalIds: customGoalIds,
       authentication_used: currentTokens.access_token ? 'OAuth 2.0' : 'Legacy API Key',
-      message: `Test ${testSuccess ? 'success' : 'error'} goal triggered for contact ${contactId}`
+      message: `Test ${testSuccess ? 'success' : 'error'} goal triggered for contact ${contactId}`,
+      humanFriendly: !!(successCallName || errorCallName)
     });
     
   } catch (error) {
@@ -773,7 +965,7 @@ app.post('/keap-goals/test', async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Keap Billing Date Calculator with OAuth 2.0 Integration listening on port ${port}`);
+  console.log(`🚀 Keap Billing Date Calculator with HUMAN-FRIENDLY Goal Integration listening on port ${port}`);
   console.log('Features enabled:');
   console.log(`  - Airtable: ${!!process.env.AIRTABLE_API_KEY ? '✓' : '✗'}`);
   console.log(`  - Webhook: ${!!process.env.WEBHOOK_URL ? '✓' : '✗'}`);
@@ -781,7 +973,9 @@ app.listen(port, () => {
   console.log(`  - OAuth Tokens: ${!!(currentTokens.access_token && currentTokens.refresh_token) ? '✓' : '✗'}`);
   console.log(`  - Legacy API: ${!!process.env.KEAP_API_TOKEN ? '✓' : '✗'}`);
   console.log(`  - Automatic Token Refresh: ${!!(currentTokens.access_token && currentTokens.refresh_token) ? '✓' : '✗'}`);
-  console.log(`  - Dynamic Goals: ✓`);
+  console.log(`  - 🎯 Human-Friendly Goals: ✓`);
+  console.log(`  - 🔍 Real-time Goal Discovery: ✓`);
+  console.log(`  - 🚀 Call Name Support: ✓`);
 });
 
 module.exports = app;
