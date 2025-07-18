@@ -4,6 +4,13 @@ const port = process.env.PORT || 8080;
 
 app.use(express.json());
 
+// In-memory token storage (in production, use secure storage)
+let currentTokens = {
+  access_token: process.env.KEAP_ACCESS_TOKEN,
+  refresh_token: process.env.KEAP_REFRESH_TOKEN,
+  expires_at: null
+};
+
 function findNextTargetDate(startDate, delayDays = 0, delayMonths = 0) {
   const adjustedDate = new Date(startDate);
   adjustedDate.setDate(adjustedDate.getDate() + delayDays);
@@ -53,12 +60,83 @@ function parseDelay(delayStr) {
 }
 
 /**
- * Triggers a goal in Keap for the specified contact
+ * Refreshes OAuth access token using refresh token
+ */
+async function refreshOAuthToken() {
+  const KEAP_CLIENT_ID = process.env.KEAP_CLIENT_ID;
+  const KEAP_CLIENT_SECRET = process.env.KEAP_CLIENT_SECRET;
+  
+  if (!currentTokens.refresh_token || !KEAP_CLIENT_ID || !KEAP_CLIENT_SECRET) {
+    throw new Error('Missing OAuth credentials for token refresh');
+  }
+  
+  try {
+    console.log('Refreshing OAuth access token...');
+    
+    const response = await fetch('https://api.infusionsoft.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: currentTokens.refresh_token,
+        client_id: KEAP_CLIENT_ID,
+        client_secret: KEAP_CLIENT_SECRET
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Token refresh failed: ${response.status} ${response.statusText}`);
+    }
+    
+    const tokenData = await response.json();
+    
+    // Update current tokens
+    currentTokens.access_token = tokenData.access_token;
+    if (tokenData.refresh_token) {
+      currentTokens.refresh_token = tokenData.refresh_token;
+    }
+    currentTokens.expires_at = Date.now() + (tokenData.expires_in * 1000);
+    
+    console.log('OAuth token refreshed successfully');
+    return tokenData;
+    
+  } catch (error) {
+    console.error('Error refreshing OAuth token:', error);
+    throw error;
+  }
+}
+
+/**
+ * Gets a valid access token, refreshing if necessary
+ */
+async function getValidAccessToken() {
+  // Check if we have OAuth tokens
+  if (currentTokens.access_token) {
+    // Check if token is expired (refresh 5 minutes before expiry)
+    if (currentTokens.expires_at && (Date.now() + 300000) >= currentTokens.expires_at) {
+      try {
+        await refreshOAuthToken();
+      } catch (error) {
+        console.error('Failed to refresh token, falling back to legacy API key');
+        return process.env.KEAP_API_TOKEN;
+      }
+    }
+    return currentTokens.access_token;
+  }
+  
+  // Fallback to legacy API token
+  return process.env.KEAP_API_TOKEN;
+}
+
+/**
+ * Triggers a goal in Keap for the specified contact with automatic token management
  */
 async function triggerKeapGoal(contactId, goalId, goalType = 'success') {
-  const KEAP_API_TOKEN = process.env.KEAP_API_TOKEN;
+  const accessToken = await getValidAccessToken();
   
-  if (!KEAP_API_TOKEN || !goalId) {
+  if (!accessToken || !goalId) {
     console.log(`Keap goal triggering not configured for ${goalType} goal, skipping`);
     return null;
   }
@@ -76,12 +154,39 @@ async function triggerKeapGoal(contactId, goalId, goalType = 'success') {
     const response = await fetch('https://api.infusionsoft.com/crm/rest/v1/campaigns/goals', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${KEAP_API_TOKEN}`,
+        'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       },
       body: JSON.stringify(payload)
     });
+    
+    // If token is invalid, try refreshing once
+    if (response.status === 401 && currentTokens.refresh_token) {
+      console.log('Access token invalid, attempting refresh...');
+      await refreshOAuthToken();
+      const newAccessToken = await getValidAccessToken();
+      
+      // Retry with new token
+      const retryResponse = await fetch('https://api.infusionsoft.com/crm/rest/v1/campaigns/goals', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${newAccessToken}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!retryResponse.ok) {
+        const errorText = await retryResponse.text();
+        throw new Error(`Keap API error after token refresh (${retryResponse.status}): ${errorText}`);
+      }
+      
+      const result = await retryResponse.json();
+      console.log(`Successfully triggered Keap ${goalType} goal for contact ${contactId} (after token refresh)`);
+      return result;
+    }
     
     if (!response.ok) {
       const errorText = await response.text();
@@ -243,29 +348,184 @@ async function sendToWebhook(contactId, calculatedDate, originalData) {
   }
 }
 
+/**
+ * OAuth Authorization Endpoint - Start OAuth flow
+ */
+app.get('/oauth/authorize', (req, res) => {
+  const KEAP_CLIENT_ID = process.env.KEAP_CLIENT_ID;
+  const KEAP_REDIRECT_URI = process.env.KEAP_REDIRECT_URI || `${req.protocol}://${req.get('host')}/oauth/callback`;
+  
+  if (!KEAP_CLIENT_ID) {
+    return res.status(400).json({
+      error: 'OAuth not configured',
+      message: 'KEAP_CLIENT_ID environment variable is required'
+    });
+  }
+  
+  const authUrl = new URL('https://signin.infusionsoft.com/app/oauth/authorize');
+  authUrl.searchParams.set('client_id', KEAP_CLIENT_ID);
+  authUrl.searchParams.set('redirect_uri', KEAP_REDIRECT_URI);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('scope', 'full');
+  
+  res.redirect(authUrl.toString());
+});
+
+/**
+ * OAuth Callback Endpoint - Handle authorization code exchange
+ */
+app.get('/oauth/callback', async (req, res) => {
+  const { code, error } = req.query;
+  
+  if (error) {
+    return res.status(400).json({
+      error: 'OAuth authorization failed',
+      details: error
+    });
+  }
+  
+  if (!code) {
+    return res.status(400).json({
+      error: 'Missing authorization code'
+    });
+  }
+  
+  const KEAP_CLIENT_ID = process.env.KEAP_CLIENT_ID;
+  const KEAP_CLIENT_SECRET = process.env.KEAP_CLIENT_SECRET;
+  const KEAP_REDIRECT_URI = process.env.KEAP_REDIRECT_URI || `${req.protocol}://${req.get('host')}/oauth/callback`;
+  
+  try {
+    const response = await fetch('https://api.infusionsoft.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: KEAP_CLIENT_ID,
+        client_secret: KEAP_CLIENT_SECRET,
+        redirect_uri: KEAP_REDIRECT_URI,
+        code: code
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Token exchange failed: ${response.status} ${response.statusText}`);
+    }
+    
+    const tokenData = await response.json();
+    
+    // Update current tokens
+    currentTokens.access_token = tokenData.access_token;
+    currentTokens.refresh_token = tokenData.refresh_token;
+    currentTokens.expires_at = Date.now() + (tokenData.expires_in * 1000);
+    
+    console.log('OAuth tokens obtained successfully');
+    
+    res.json({
+      success: true,
+      message: 'OAuth authorization successful',
+      token_info: {
+        expires_in: tokenData.expires_in,
+        scope: tokenData.scope,
+        expires_at: new Date(currentTokens.expires_at).toISOString()
+      },
+      next_steps: [
+        'Set KEAP_ACCESS_TOKEN environment variable to: ' + tokenData.access_token,
+        'Set KEAP_REFRESH_TOKEN environment variable to: ' + tokenData.refresh_token,
+        'Your service will now automatically refresh tokens as needed'
+      ]
+    });
+    
+  } catch (error) {
+    console.error('OAuth callback error:', error);
+    res.status(500).json({
+      error: 'Token exchange failed',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * OAuth Status Endpoint - Check current OAuth status
+ */
+app.get('/oauth/status', async (req, res) => {
+  const KEAP_CLIENT_ID = process.env.KEAP_CLIENT_ID;
+  const KEAP_CLIENT_SECRET = process.env.KEAP_CLIENT_SECRET;
+  
+  const status = {
+    oauth_configured: !!(KEAP_CLIENT_ID && KEAP_CLIENT_SECRET),
+    has_access_token: !!currentTokens.access_token,
+    has_refresh_token: !!currentTokens.refresh_token,
+    token_expires_at: currentTokens.expires_at ? new Date(currentTokens.expires_at).toISOString() : null,
+    token_valid: false,
+    fallback_to_legacy: !!process.env.KEAP_API_TOKEN
+  };
+  
+  if (currentTokens.access_token) {
+    try {
+      const testResponse = await fetch('https://api.infusionsoft.com/crm/rest/v1/account/profile', {
+        headers: {
+          'Authorization': `Bearer ${currentTokens.access_token}`
+        }
+      });
+      status.token_valid = testResponse.ok;
+    } catch (error) {
+      status.token_valid = false;
+    }
+  }
+  
+  res.json(status);
+});
+
+/**
+ * Manual Token Refresh Endpoint
+ */
+app.post('/oauth/refresh', async (req, res) => {
+  try {
+    const result = await refreshOAuthToken();
+    res.json({
+      success: true,
+      message: 'Token refreshed successfully',
+      expires_in: result.expires_in,
+      expires_at: new Date(currentTokens.expires_at).toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Token refresh failed',
+      details: error.message
+    });
+  }
+});
+
 app.get('/', (req, res) => {
+  const hasOAuthConfig = !!(process.env.KEAP_CLIENT_ID && process.env.KEAP_CLIENT_SECRET);
+  const hasOAuthTokens = !!(currentTokens.access_token && currentTokens.refresh_token);
+  
   res.json({
     status: 'healthy',
-    message: 'Keap Billing Date Calculator with Airtable, Webhook & Dynamic Goal Integration',
+    message: 'Keap Billing Date Calculator with OAuth 2.0 & Dynamic Goal Integration',
     features: {
       airtable: !!process.env.AIRTABLE_API_KEY,
       webhook: !!process.env.WEBHOOK_URL,
       keapGoals: {
-        enabled: !!process.env.KEAP_API_TOKEN,
+        enabled: !!(currentTokens.access_token || process.env.KEAP_API_TOKEN),
+        oauth_configured: hasOAuthConfig,
+        oauth_tokens: hasOAuthTokens,
+        automatic_refresh: hasOAuthTokens,
         defaultSuccessGoal: !!process.env.KEAP_SUCCESS_GOAL_ID,
         defaultErrorGoal: !!process.env.KEAP_ERROR_GOAL_ID,
         dynamicGoals: true
       }
     },
     endpoints: {
-      'POST /calculate-billing-date': 'Calculate billing date with optional dynamic goal IDs',
-      'GET /billing-date/:contactId': 'Get stored billing date from Airtable'
+      'POST /calculate-billing-date': 'Calculate billing date with automatic OAuth token management',
+      'GET /oauth/authorize': 'Start OAuth authorization flow',
+      'GET /oauth/callback': 'OAuth callback endpoint',
+      'GET /oauth/status': 'Check OAuth token status',
+      'POST /oauth/refresh': 'Manually refresh OAuth token'
     },
-    environment: {
-      KEAP_API_TOKEN: process.env.KEAP_API_TOKEN ? 'configured' : 'missing',
-      KEAP_SUCCESS_GOAL_ID: process.env.KEAP_SUCCESS_GOAL_ID ? 'configured' : 'missing (can use request-level)',
-      KEAP_ERROR_GOAL_ID: process.env.KEAP_ERROR_GOAL_ID ? 'configured' : 'missing (can use request-level)'
-    }
+    oauth_setup: hasOAuthConfig ? 'configured' : 'Go to /oauth/authorize to start OAuth flow'
   });
 });
 
@@ -278,7 +538,7 @@ app.post('/calculate-billing-date', async (req, res) => {
       skipWebhook = false, 
       skipAirtable = false, 
       skipKeapGoals = false,
-      // NEW: Dynamic goal IDs
+      // Dynamic goal IDs
       keapSuccessGoalId,
       keapErrorGoalId 
     } = req.body;
@@ -378,7 +638,7 @@ app.post('/calculate-billing-date', async (req, res) => {
       }
     }
     
-    // Keap Goal integration with dynamic goal IDs
+    // Keap Goal integration with automatic OAuth token management
     if (!skipKeapGoals) {
       try {
         result.integrations.keapGoal.attempted = true;
@@ -427,35 +687,39 @@ app.post('/calculate-billing-date', async (req, res) => {
 });
 
 /**
- * Health check endpoint for Keap goals specifically
+ * Health check endpoint for Keap goals with OAuth status
  */
 app.get('/keap-goals/health', (req, res) => {
-  const KEAP_API_TOKEN = process.env.KEAP_API_TOKEN;
-  const KEAP_SUCCESS_GOAL_ID = process.env.KEAP_SUCCESS_GOAL_ID;
-  const KEAP_ERROR_GOAL_ID = process.env.KEAP_ERROR_GOAL_ID;
+  const hasOAuthTokens = !!(currentTokens.access_token && currentTokens.refresh_token);
+  const hasLegacyToken = !!process.env.KEAP_API_TOKEN;
   
   res.json({
     keapGoalIntegration: {
-      status: KEAP_API_TOKEN ? 'configured' : 'not configured',
-      apiToken: KEAP_API_TOKEN ? 'present' : 'missing',
-      defaultSuccessGoalId: KEAP_SUCCESS_GOAL_ID || 'not configured',
-      defaultErrorGoalId: KEAP_ERROR_GOAL_ID || 'not configured',
+      status: (hasOAuthTokens || hasLegacyToken) ? 'configured' : 'not configured',
+      oauth_tokens: hasOAuthTokens ? 'present' : 'missing',
+      legacy_token: hasLegacyToken ? 'present' : 'missing',
+      authentication_method: hasOAuthTokens ? 'OAuth 2.0' : (hasLegacyToken ? 'Legacy API Key' : 'none'),
+      automatic_refresh: hasOAuthTokens,
+      defaultSuccessGoalId: process.env.KEAP_SUCCESS_GOAL_ID || 'not configured',
+      defaultErrorGoalId: process.env.KEAP_ERROR_GOAL_ID || 'not configured',
       dynamicGoalsSupported: true,
-      ready: !!KEAP_API_TOKEN
+      ready: !!(hasOAuthTokens || hasLegacyToken)
+    },
+    oauth_status: {
+      configured: !!(process.env.KEAP_CLIENT_ID && process.env.KEAP_CLIENT_SECRET),
+      has_tokens: hasOAuthTokens,
+      token_expires_at: currentTokens.expires_at ? new Date(currentTokens.expires_at).toISOString() : null
     },
     usage: {
+      'OAuth Setup': 'Visit /oauth/authorize to get OAuth tokens',
       'Default Goals': 'Set KEAP_SUCCESS_GOAL_ID and KEAP_ERROR_GOAL_ID environment variables',
-      'Dynamic Goals': 'Pass keapSuccessGoalId and keapErrorGoalId in request body',
-      'Priority': 'Request-level goal IDs override environment variables'
-    },
-    endpoints: {
-      'POST /keap-goals/test': 'Test goal triggering with sample data'
+      'Dynamic Goals': 'Pass keapSuccessGoalId and keapErrorGoalId in request body'
     }
   });
 });
 
 /**
- * Test endpoint for Keap goal integration with dynamic goal support
+ * Test endpoint for Keap goal integration with OAuth
  */
 app.post('/keap-goals/test', async (req, res) => {
   try {
@@ -496,6 +760,7 @@ app.post('/keap-goals/test', async (req, res) => {
       contactId: contactId,
       goalResult: goalResult,
       customGoalIds: customGoalIds,
+      authentication_used: currentTokens.access_token ? 'OAuth 2.0' : 'Legacy API Key',
       message: `Test ${testSuccess ? 'success' : 'error'} goal triggered for contact ${contactId}`
     });
     
@@ -508,16 +773,15 @@ app.post('/keap-goals/test', async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Keap Billing Date Calculator with Dynamic Goal Integration listening on port ${port}`);
+  console.log(`Keap Billing Date Calculator with OAuth 2.0 Integration listening on port ${port}`);
   console.log('Features enabled:');
   console.log(`  - Airtable: ${!!process.env.AIRTABLE_API_KEY ? '✓' : '✗'}`);
   console.log(`  - Webhook: ${!!process.env.WEBHOOK_URL ? '✓' : '✗'}`);
-  console.log(`  - Keap Goals: ${!!process.env.KEAP_API_TOKEN ? '✓' : '✗'}`);
-  console.log(`  - Dynamic Goals: ✓ (request-level goal IDs supported)`);
-  if (process.env.KEAP_API_TOKEN) {
-    console.log(`    - Default Success Goal ID: ${process.env.KEAP_SUCCESS_GOAL_ID || 'not configured'}`);
-    console.log(`    - Default Error Goal ID: ${process.env.KEAP_ERROR_GOAL_ID || 'not configured'}`);
-  }
+  console.log(`  - OAuth 2.0: ${!!(process.env.KEAP_CLIENT_ID && process.env.KEAP_CLIENT_SECRET) ? '✓' : '✗'}`);
+  console.log(`  - OAuth Tokens: ${!!(currentTokens.access_token && currentTokens.refresh_token) ? '✓' : '✗'}`);
+  console.log(`  - Legacy API: ${!!process.env.KEAP_API_TOKEN ? '✓' : '✗'}`);
+  console.log(`  - Automatic Token Refresh: ${!!(currentTokens.access_token && currentTokens.refresh_token) ? '✓' : '✗'}`);
+  console.log(`  - Dynamic Goals: ✓`);
 });
 
 module.exports = app;
