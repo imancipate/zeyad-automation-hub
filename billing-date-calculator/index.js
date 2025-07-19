@@ -45,8 +45,8 @@ function parseDelay(delayStr) {
   
   if (!delayStr) return { days, months };
   
-  const dayMatch = delayStr.match(/(\d+)\s*days?/i);
-  const monthMatch = delayStr.match(/(\d+)\s*months?/i);
+  const dayMatch = delayStr.match(/(\\d+)\\s*days?/i);
+  const monthMatch = delayStr.match(/(\\d+)\\s*months?/i);
   
   if (dayMatch) {
     days = parseInt(dayMatch[1]);
@@ -148,176 +148,139 @@ async function getValidAccessToken() {
 }
 
 /**
- * PERFORMANCE OPTIMIZED: Discovers Goal ID with timeout and better error handling
+ * 🎯 CORRECT IMPLEMENTATION: XML-RPC FunnelService.achieveGoal
+ * Based on official Keap documentation at developer.infusionsoft.com
  */
-async function discoverGoalIdByCallName(callName, integration = 'zeyadhq', timeoutMs = 10000) {
+async function triggerKeapGoalXMLRPC(contactId, integration, callName) {
   const accessToken = await getValidAccessToken();
   
-  if (!accessToken) {
-    throw new Error('No access token available for goal discovery');
-  }
-  
-  try {
-    console.log(`🔍 Discovering Goal ID for call_name: "${callName}" with integration: "${integration}" (timeout: ${timeoutMs}ms)`);
-    
-    // Create timeout promise
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Goal discovery timed out - Keap API is slow')), timeoutMs);
-    });
-    
-    // Create API call promise
-    const apiPromise = fetch('https://api.infusionsoft.com/crm/rest/v1/campaigns', {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Accept': 'application/json'
-      }
-    });
-    
-    // Race between API call and timeout
-    const response = await Promise.race([apiPromise, timeoutPromise]);
-    
-    if (!response.ok) {
-      throw new Error(`Failed to fetch campaigns: ${response.status} ${response.statusText}`);
-    }
-    
-    const campaigns = await response.json();
-    
-    // Search through all campaigns for matching goals
-    let goalCount = 0;
-    for (const campaign of campaigns.campaigns || []) {
-      if (campaign.goals && campaign.goals.length > 0) {
-        goalCount += campaign.goals.length;
-        for (const goal of campaign.goals) {
-          // Match by call_name and integration
-          if (goal.call_name === callName && goal.integration === integration) {
-            console.log(`✅ Found Goal ID ${goal.id} for "${callName}" in campaign "${campaign.name}" (searched ${goalCount} goals)`);
-            return {
-              goalId: goal.id,
-              campaignId: campaign.id,
-              campaignName: campaign.name,
-              goalName: goal.name || callName,
-              discoveryMethod: 'api_search',
-              searchStats: {
-                campaignCount: campaigns.campaigns?.length || 0,
-                goalCount: goalCount
-              }
-            };
-          }
-        }
-      }
-    }
-    
-    // If not found, return detailed error
-    throw new Error(`Goal not found: No goal with call_name "${callName}" and integration "${integration}" exists in any active campaign (searched ${campaigns.campaigns?.length || 0} campaigns, ${goalCount} goals)`);
-    
-  } catch (error) {
-    console.error(`❌ Goal discovery failed for "${callName}":`, error.message);
-    throw error;
-  }
-}
-
-/**
- * Enhanced goal triggering with timeout handling
- */
-async function triggerKeapGoalByCallName(contactId, callName, goalType = 'success', integration = 'zeyadhq') {
-  try {
-    // Step 1: Discover the Goal ID with timeout
-    const discoveryResult = await discoverGoalIdByCallName(callName, integration, 8000); // 8 second timeout
-    const goalId = discoveryResult.goalId;
-    
-    console.log(`🎯 Triggering goal "${callName}" (ID: ${goalId}) for contact ${contactId}`);
-    
-    // Step 2: Trigger the goal using the discovered ID
-    const result = await triggerKeapGoal(contactId, goalId, goalType);
-    
-    return {
-      ...result,
-      goalDiscovery: discoveryResult,
-      callName: callName,
-      integration: integration
-    };
-    
-  } catch (error) {
-    console.error(`Failed to trigger goal by call name "${callName}":`, error);
-    throw error;
-  }
-}
-
-/**
- * Original goal triggering function (still used internally)
- */
-async function triggerKeapGoal(contactId, goalId, goalType = 'success') {
-  const accessToken = await getValidAccessToken();
-  
-  if (!accessToken || !goalId) {
-    console.log(`Keap goal triggering not configured for ${goalType} goal, skipping`);
+  if (!accessToken || !integration || !callName) {
+    console.log(`Keap goal triggering not configured properly, missing: ${!accessToken ? 'token' : ''} ${!integration ? 'integration' : ''} ${!callName ? 'callName' : ''}`);
     return null;
   }
   
   try {
-    const payload = {
-      contact_id: parseInt(contactId),
-      goal_id: parseInt(goalId),
-      call_name: goalType === 'success' ? 'billcalcsucc' : 'billcalcfail',
-      integration: 'zeyadhq'
-    };
+    console.log(`🎯 Triggering Keap goal: integration="${integration}", callName="${callName}", contactId=${contactId}`);
     
-    console.log(`Triggering Keap ${goalType} goal ${goalId} for contact ${contactId}`);
+    // Create XML-RPC payload according to Keap documentation
+    const xmlPayload = `<?xml version='1.0' encoding='UTF-8'?>
+<methodCall>
+  <methodName>FunnelService.achieveGoal</methodName>
+  <params>
+    <param>
+      <value><string>${accessToken}</string></value>
+    </param>
+    <param>
+      <value><string>${integration}</string></value>
+    </param>
+    <param>
+      <value><string>${callName}</string></value>
+    </param>
+    <param>
+      <value><int>${contactId}</int></value>
+    </param>
+  </params>
+</methodCall>`;
     
-    const response = await fetch('https://api.infusionsoft.com/crm/rest/v1/campaigns/goals', {
+    // Send XML-RPC request to Keap
+    const response = await fetch('https://api.infusionsoft.com/crm/xmlrpc/v1', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Content-Type': 'text/xml',
+        'Accept': 'text/xml'
       },
-      body: JSON.stringify(payload)
+      body: xmlPayload
     });
     
-    // If token is invalid, try refreshing once
-    if (response.status === 401 && currentTokens.refresh_token) {
-      console.log('Access token invalid, attempting refresh...');
-      await refreshOAuthToken();
-      const newAccessToken = await getValidAccessToken();
-      
-      // Retry with new token
-      const retryResponse = await fetch('https://api.infusionsoft.com/crm/rest/v1/campaigns/goals', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${newAccessToken}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      });
-      
-      if (!retryResponse.ok) {
-        const errorText = await retryResponse.text();
-        throw new Error(`Keap API error after token refresh (${retryResponse.status}): ${errorText}`);
-      }
-      
-      const result = await retryResponse.json();
-      console.log(`Successfully triggered Keap ${goalType} goal for contact ${contactId} (after token refresh)`);
-      return result;
-    }
+    const responseText = await response.text();
+    console.log(`📥 Keap XML-RPC response:`, responseText);
     
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Keap API error (${response.status}): ${errorText}`);
+      throw new Error(`Keap XML-RPC error (${response.status}): ${responseText}`);
     }
     
-    const result = await response.json();
-    console.log(`Successfully triggered Keap ${goalType} goal for contact ${contactId}`);
-    return result;
+    // Parse basic success from XML response
+    const isSuccess = responseText.includes('<boolean>1</boolean>') || responseText.includes('success');
+    
+    if (isSuccess) {
+      console.log(`✅ Successfully triggered Keap goal "${callName}" for contact ${contactId}`);
+      return {
+        success: true,
+        integration: integration,
+        callName: callName,
+        contactId: contactId,
+        method: 'xml_rpc_funnel_service',
+        response: responseText
+      };
+    } else {
+      throw new Error(`Goal trigger failed: ${responseText}`);
+    }
     
   } catch (error) {
-    console.error(`Error triggering Keap ${goalType} goal:`, error);
+    console.error(`❌ Error triggering Keap goal:`, error);
+    
+    // If token is invalid, try refreshing once
+    if (error.message.includes('401') && currentTokens.refresh_token) {
+      console.log('🔄 Access token invalid, attempting refresh and retry...');
+      try {
+        await refreshOAuthToken();
+        const newAccessToken = await getValidAccessToken();
+        
+        // Retry with new token
+        const retryXmlPayload = `<?xml version='1.0' encoding='UTF-8'?>
+<methodCall>
+  <methodName>FunnelService.achieveGoal</methodName>
+  <params>
+    <param>
+      <value><string>${newAccessToken}</string></value>
+    </param>
+    <param>
+      <value><string>${integration}</string></value>
+    </param>
+    <param>
+      <value><string>${callName}</string></value>
+    </param>
+    <param>
+      <value><int>${contactId}</int></value>
+    </param>
+  </params>
+</methodCall>`;
+        
+        const retryResponse = await fetch('https://api.infusionsoft.com/crm/xmlrpc/v1', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'text/xml',
+            'Accept': 'text/xml'
+          },
+          body: retryXmlPayload
+        });
+        
+        const retryResponseText = await retryResponse.text();
+        
+        if (retryResponseText.includes('<boolean>1</boolean>') || retryResponseText.includes('success')) {
+          console.log(`✅ Successfully triggered Keap goal "${callName}" for contact ${contactId} (after token refresh)`);
+          return {
+            success: true,
+            integration: integration,
+            callName: callName,
+            contactId: contactId,
+            method: 'xml_rpc_funnel_service_retry',
+            response: retryResponseText
+          };
+        }
+        
+      } catch (refreshError) {
+        console.error('Token refresh failed:', refreshError);
+      }
+    }
+    
     throw error;
   }
 }
 
 /**
- * SMART GOAL HANDLER: Call name discovery with fallback to Goal IDs
+ * 🚀 ENHANCED: Goal handler using correct XML-RPC FunnelService
+ * Works with ANY integration and callName you choose
  */
 async function handleKeapGoals(contactId, isSuccess, errorDetails = null, goalConfig = {}) {
   const goalType = isSuccess ? 'success' : 'error';
@@ -326,58 +289,45 @@ async function handleKeapGoals(contactId, isSuccess, errorDetails = null, goalCo
     attempted: false,
     success: false,
     goalType: goalType,
-    method: 'unknown',
+    method: 'xml_rpc_funnel_service',
     source: 'unknown'
   };
   
   try {
     goalResult.attempted = true;
     
-    // Option 1: Try human-friendly call names with timeout protection
+    // Get the call name and integration for the goal
     const callName = isSuccess ? goalConfig.successCallName : goalConfig.errorCallName;
     const integration = goalConfig.integration || 'zeyadhq';
     
     if (callName) {
-      try {
-        console.log(`🚀 Attempting call name discovery: "${callName}"`);
-        const result = await triggerKeapGoalByCallName(contactId, callName, goalType, integration);
-        goalResult.success = !!result;
-        goalResult.method = 'call_name_discovery';
-        goalResult.source = 'request';
-        goalResult.callName = callName;
-        goalResult.integration = integration;
-        goalResult.goalDiscovery = result.goalDiscovery;
-        goalResult.response = result;
-        return goalResult;
-      } catch (discoveryError) {
-        console.log(`⚠️ Call name discovery failed: ${discoveryError.message}`);
-        goalResult.discoveryError = discoveryError.message;
-        
-        // Fall through to try Goal IDs as fallback
-        console.log(`🔄 Falling back to Goal ID method...`);
-      }
+      console.log(`🎯 Using XML-RPC FunnelService: integration="${integration}", callName="${callName}"`);
+      const result = await triggerKeapGoalXMLRPC(contactId, integration, callName);
+      goalResult.success = !!result;
+      goalResult.method = 'xml_rpc_funnel_service';
+      goalResult.source = 'request';
+      goalResult.callName = callName;
+      goalResult.integration = integration;
+      goalResult.response = result;
+      return goalResult;
     }
     
-    // Option 2: Use legacy Goal IDs (FALLBACK)
+    // FALLBACK: Inform that legacy goal IDs won't work for campaign goals
     const goalId = isSuccess ? 
       (goalConfig.successGoalId || process.env.KEAP_SUCCESS_GOAL_ID) : 
       (goalConfig.errorGoalId || process.env.KEAP_ERROR_GOAL_ID);
     
     if (goalId) {
-      console.log(`⚙️ Using fallback Goal ID: ${goalId}`);
-      const result = await triggerKeapGoal(contactId, goalId, goalType);
-      goalResult.success = !!result;
-      goalResult.method = 'direct_goal_id';
-      goalResult.source = goalConfig.successGoalId || goalConfig.errorGoalId ? 'request' : 'environment';
-      goalResult.goalId = goalId;
-      goalResult.response = result;
-      goalResult.fallbackUsed = true;
+      console.log(`⚠️  Legacy Goal ID provided (${goalId}) but campaign goals require XML-RPC with callName`);
+      console.log(`📝 Please use callName instead for campaign goals`);
+      goalResult.skipped = true;
+      goalResult.reason = `Legacy goal ID ${goalId} provided but campaign goals require XML-RPC with callName`;
       return goalResult;
     }
     
-    // Option 3: No goal configuration found
+    // No goal configuration found
     goalResult.skipped = true;
-    goalResult.reason = `No ${goalType} goal configured (neither call name nor goal ID provided)`;
+    goalResult.reason = `No ${goalType} goal configured (callName required for campaign goals)`;
     return goalResult;
     
   } catch (error) {
@@ -646,7 +596,7 @@ app.get('/', (req, res) => {
   
   res.json({
     status: 'healthy',
-    message: '🚀 Keap Billing Date Calculator - FAST & AUTONOMOUS SYSTEM',
+    message: '🚀 Keap Billing Date Calculator - FIXED WITH CORRECT XML-RPC API',
     features: {
       airtable: !!process.env.AIRTABLE_API_KEY,
       webhook: !!process.env.WEBHOOK_URL,
@@ -655,36 +605,31 @@ app.get('/', (req, res) => {
         oauth_configured: hasOAuthConfig,
         oauth_tokens: hasOAuthTokens,
         automatic_refresh: hasOAuthTokens,
-        humanFriendlyGoals: true,
-        goalDiscovery: true,
-        timeoutProtection: true,
-        smartFallback: true,
+        xmlRpcFunnelService: true,
         autonomousOperation: productionReady,
         productionReady: productionReady,
-        defaultSuccessGoal: !!process.env.KEAP_SUCCESS_GOAL_ID,
-        defaultErrorGoal: !!process.env.KEAP_ERROR_GOAL_ID,
-        dynamicGoals: true
+        correctedImplementation: '✅ Now uses XML-RPC FunnelService.achieveGoal as per Keap docs'
       }
     },
     endpoints: {
-      'POST /calculate-billing-date': 'Calculate billing date with FAST goal triggering',
-      'GET /oauth/authorize': 'One-time OAuth setup (never needed again after env vars set)',
+      'POST /calculate-billing-date': 'Calculate billing date with CORRECTED goal triggering',
+      'GET /oauth/authorize': 'One-time OAuth setup',
       'GET /oauth/callback': 'OAuth callback endpoint',
       'GET /oauth/status': 'Check OAuth token status',
       'POST /oauth/refresh': 'Manually refresh OAuth token',
-      'POST /goals/discover': 'Test goal discovery by call name (with timeout)'
+      'POST /goals/test': 'Test XML-RPC goal triggering'
     },
-    human_friendly_usage: {
-      preferred_format: {
+    goal_configuration: {
+      required_format: {
         successCallName: 'billcalcsucc',
         errorCallName: 'billcalcfail',
         integration: 'zeyadhq'
       },
-      legacy_format: {
-        keapSuccessGoalId: '123',
-        keapErrorGoalId: '456'
-      },
-      smart_fallback: 'Automatically falls back to Goal IDs if call name discovery times out'
+      keap_setup_instructions: [
+        '1. Create a campaign in Keap',
+        '2. Add goals with Integration: "zeyadhq" and Call Names: "billcalcsucc", "billcalcfail"',
+        '3. Goals will trigger automatically when API is called'
+      ]
     },
     oauth_setup: productionReady ? 'AUTONOMOUS - NO HUMAN INTERVENTION REQUIRED' : 
                  hasOAuthConfig ? 'configured - visit /oauth/authorize once to get tokens' : 
@@ -693,8 +638,8 @@ app.get('/', (req, res) => {
 });
 
 /**
- * 🚀 FAST BILLING DATE CALCULATION ENDPOINT
- * With smart timeout protection and fallback mechanisms
+ * 🚀 FIXED BILLING DATE CALCULATION ENDPOINT
+ * Now uses correct XML-RPC FunnelService for campaign goals
  */
 app.post('/calculate-billing-date', async (req, res) => {
   try {
@@ -706,12 +651,12 @@ app.post('/calculate-billing-date', async (req, res) => {
       skipAirtable = false, 
       skipKeapGoals = false,
       
-      // 🎯 HUMAN-FRIENDLY GOAL CONFIGURATION (with fallback)
-      successCallName,
-      errorCallName,
+      // CORRECT GOAL CONFIGURATION
+      successCallName = 'billcalcsucc',
+      errorCallName = 'billcalcfail', 
       integration = 'zeyadhq',
       
-      // 🔧 LEGACY GOAL IDs (SMART FALLBACK)
+      // Legacy (won't work for campaign goals)
       keapSuccessGoalId,
       keapErrorGoalId 
     } = req.body;
@@ -723,11 +668,9 @@ app.post('/calculate-billing-date', async (req, res) => {
           contactId: '12345', 
           date: '2024-01-10', 
           delay: '5 days 2 months',
-          // Human-friendly with fallback
           successCallName: 'billcalcsucc',
           errorCallName: 'billcalcfail',
-          keapSuccessGoalId: '123',  // fallback
-          keapErrorGoalId: '456'     // fallback
+          integration: 'zeyadhq'
         }
       });
     }
@@ -814,24 +757,19 @@ app.post('/calculate-billing-date', async (req, res) => {
       }
     }
     
-    // 🚀 FAST KEAP GOAL INTEGRATION with SMART FALLBACK
+    // 🎯 FIXED KEAP GOAL INTEGRATION - Using XML-RPC FunnelService
     if (!skipKeapGoals) {
       try {
         result.integrations.keapGoal.attempted = true;
         
-        // Create goal configuration object with fallback
         const goalConfig = {
-          // Human-friendly call names (PREFERRED)
           successCallName: successCallName,
           errorCallName: errorCallName,
           integration: integration,
-          
-          // Legacy goal IDs (SMART FALLBACK)
           successGoalId: keapSuccessGoalId,
           errorGoalId: keapErrorGoalId
         };
         
-        // Determine success/failure based on main calculation and critical integrations
         const hasIntegrationFailures = integrationErrors.length > 0;
         const goalResult = await handleKeapGoals(
           contactId, 
@@ -851,12 +789,11 @@ app.post('/calculate-billing-date', async (req, res) => {
     
   } catch (error) {
     // Trigger error goal for calculation failures
-    const { contactId, errorCallName, keapErrorGoalId, integration } = req.body;
+    const { contactId, errorCallName, integration } = req.body;
     if (contactId && !req.body.skipKeapGoals) {
       try {
         const goalConfig = { 
-          errorCallName: errorCallName,
-          errorGoalId: keapErrorGoalId,
+          errorCallName: errorCallName || 'billcalcfail',
           integration: integration || 'zeyadhq'
         };
         await handleKeapGoals(contactId, false, error.message, goalConfig);
@@ -873,117 +810,16 @@ app.post('/calculate-billing-date', async (req, res) => {
 });
 
 /**
- * 🔍 Test endpoint for goal discovery (with timeout protection)
+ * 🔍 Test endpoint for XML-RPC goal triggering
  */
-app.post('/goals/discover', async (req, res) => {
-  try {
-    const { callName, integration = 'zeyadhq', timeout = 8000 } = req.body;
-    
-    if (!callName) {
-      return res.status(400).json({
-        error: 'callName is required',
-        example: { 
-          callName: 'billcalcsucc',
-          integration: 'zeyadhq',
-          timeout: 8000
-        }
-      });
-    }
-    
-    const discoveryResult = await discoverGoalIdByCallName(callName, integration, timeout);
-    
-    res.json({
-      success: true,
-      message: `Goal discovered successfully`,
-      callName: callName,
-      integration: integration,
-      discovery: discoveryResult,
-      timeout_used: timeout,
-      performance_optimized: true
-    });
-    
-  } catch (error) {
-    res.status(408).json({
-      error: 'Goal discovery failed',
-      callName: req.body.callName,
-      integration: req.body.integration || 'zeyadhq',
-      details: error.message,
-      timeout_used: req.body.timeout || 8000,
-      suggestion: error.message.includes('timed out') ? 
-        'Try using Goal IDs directly for faster performance' : 
-        'Make sure the goal exists in an active campaign with the correct call_name and integration values'
-    });
-  }
-});
-
-/**
- * Health check endpoint for Keap goals with PERFORMANCE STATUS
- */
-app.get('/keap-goals/health', (req, res) => {
-  const hasOAuthTokens = !!(currentTokens.access_token && currentTokens.refresh_token);
-  const hasLegacyToken = !!process.env.KEAP_API_TOKEN;
-  const productionReady = !!(process.env.KEAP_ACCESS_TOKEN && process.env.KEAP_REFRESH_TOKEN);
-  
-  res.json({
-    keapGoalIntegration: {
-      status: (hasOAuthTokens || hasLegacyToken) ? 'configured' : 'not configured',
-      oauth_tokens: hasOAuthTokens ? 'present' : 'missing',
-      legacy_token: hasLegacyToken ? 'present' : 'missing',
-      authentication_method: hasOAuthTokens ? 'OAuth 2.0' : (hasLegacyToken ? 'Legacy API Key' : 'none'),
-      automatic_refresh: hasOAuthTokens,
-      
-      // PERFORMANCE FEATURES
-      autonomousOperation: productionReady,
-      productionReady: productionReady,
-      humanFriendlyGoals: true,
-      goalDiscoverySupported: true,
-      timeoutProtection: true,
-      smartFallback: true,
-      performanceOptimized: true,
-      realTimeGoalLookup: true,
-      noCachingRequired: true,
-      shortNamesForKeapLimits: true,
-      noHumanInterventionRequired: productionReady,
-      
-      defaultSuccessGoalId: process.env.KEAP_SUCCESS_GOAL_ID || 'not configured',
-      defaultErrorGoalId: process.env.KEAP_ERROR_GOAL_ID || 'not configured',
-      dynamicGoalsSupported: true,
-      ready: !!(hasOAuthTokens || hasLegacyToken)
-    },
-    oauth_status: {
-      configured: !!(process.env.KEAP_CLIENT_ID && process.env.KEAP_CLIENT_SECRET),
-      has_tokens: hasOAuthTokens,
-      token_expires_at: currentTokens.expires_at ? new Date(currentTokens.expires_at).toISOString() : null,
-      autonomous: productionReady
-    },
-    usage: {
-      'FAST OPERATION': 'Optimized with timeouts and smart fallbacks',
-      'Human-Friendly Goals': 'Use successCallName: "billcalcsucc" and errorCallName: "billcalcfail"',
-      'Smart Fallback': 'Automatically uses Goal IDs if call name discovery times out',
-      'Goal Discovery': 'POST /goals/discover to test call name discovery (with timeout)',
-      'Integration': 'Use integration: "zeyadhq" (fits Keap character limits)',
-      'Legacy Support': 'Still supports keapSuccessGoalId and keapErrorGoalId for backwards compatibility'
-    }
-  });
-});
-
-/**
- * Enhanced test endpoint with TIMEOUT PROTECTION
- */
-app.post('/keap-goals/test', async (req, res) => {
+app.post('/goals/test', async (req, res) => {
   try {
     const { 
       contactId, 
       testSuccess = true,
-      
-      // Human-friendly options (with fallback)
-      successCallName,
-      errorCallName,
-      integration = 'zeyadhq',
-      
-      // Legacy options (smart fallback)
-      keapSuccessGoalId, 
-      keapErrorGoalId 
+      successCallName = 'billcalcsucc',
+      errorCallName = 'billcalcfail',
+      integration = 'zeyadhq'
     } = req.body;
     
     if (!contactId) {
@@ -994,8 +830,7 @@ app.post('/keap-goals/test', async (req, res) => {
           testSuccess: true,
           successCallName: 'billcalcsucc',
           errorCallName: 'billcalcfail',
-          keapSuccessGoalId: '123',  // fallback
-          keapErrorGoalId: '456'     // fallback
+          integration: 'zeyadhq'
         }
       });
     }
@@ -1003,9 +838,7 @@ app.post('/keap-goals/test', async (req, res) => {
     const goalConfig = {
       successCallName: successCallName,
       errorCallName: errorCallName,
-      integration: integration,
-      successGoalId: keapSuccessGoalId,
-      errorGoalId: keapErrorGoalId
+      integration: integration
     };
     
     const goalResult = await handleKeapGoals(
@@ -1023,9 +856,8 @@ app.post('/keap-goals/test', async (req, res) => {
       goalResult: goalResult,
       authentication_used: currentTokens.access_token ? 'OAuth 2.0' : 'Legacy API Key',
       message: `Test ${testSuccess ? 'success' : 'error'} goal triggered for contact ${contactId}`,
-      humanFriendly: !!(successCallName || errorCallName),
-      smartFallback: goalResult.fallbackUsed || false,
-      performanceOptimized: true
+      method: 'xml_rpc_funnel_service',
+      keap_documentation: 'Uses XML-RPC FunnelService.achieveGoal as per developer.infusionsoft.com'
     });
     
   } catch (error) {
@@ -1036,8 +868,49 @@ app.post('/keap-goals/test', async (req, res) => {
   }
 });
 
+/**
+ * Health check endpoint for Keap goals
+ */
+app.get('/keap-goals/health', (req, res) => {
+  const hasOAuthTokens = !!(currentTokens.access_token && currentTokens.refresh_token);
+  const hasLegacyToken = !!process.env.KEAP_API_TOKEN;
+  const productionReady = !!(process.env.KEAP_ACCESS_TOKEN && process.env.KEAP_REFRESH_TOKEN);
+  
+  res.json({
+    keapGoalIntegration: {
+      status: (hasOAuthTokens || hasLegacyToken) ? 'configured' : 'not configured',
+      oauth_tokens: hasOAuthTokens ? 'present' : 'missing',
+      legacy_token: hasLegacyToken ? 'present' : 'missing',
+      authentication_method: hasOAuthTokens ? 'OAuth 2.0' : (hasLegacyToken ? 'Legacy API Key' : 'none'),
+      automatic_refresh: hasOAuthTokens,
+      
+      // FIXED IMPLEMENTATION FEATURES
+      autonomousOperation: productionReady,
+      productionReady: productionReady,
+      xmlRpcFunnelService: true,
+      correctKeapImplementation: '✅ Fixed to use XML-RPC FunnelService.achieveGoal',
+      supportsCampaignGoals: true,
+      fixedBugFromRestAPI: 'Was using incorrect REST API, now uses XML-RPC as per Keap docs',
+      
+      ready: !!(hasOAuthTokens || hasLegacyToken)
+    },
+    oauth_status: {
+      configured: !!(process.env.KEAP_CLIENT_ID && process.env.KEAP_CLIENT_SECRET),
+      has_tokens: hasOAuthTokens,
+      token_expires_at: currentTokens.expires_at ? new Date(currentTokens.expires_at).toISOString() : null,
+      autonomous: productionReady
+    },
+    setup_instructions: {
+      '1_create_goals_in_keap': 'In your Keap campaign, create goals with Integration: "zeyadhq"',
+      '2_set_call_names': 'Set Call Names: "billcalcsucc" for success, "billcalcfail" for error',
+      '3_api_will_trigger': 'API will automatically trigger goals using XML-RPC FunnelService.achieveGoal',
+      '4_no_goal_ids_needed': 'You choose the integration and callName values'
+    }
+  });
+});
+
 app.listen(port, () => {
-  console.log(`🚀 Keap Billing Date Calculator - FAST & AUTONOMOUS SYSTEM listening on port ${port}`);
+  console.log(`🚀 Keap Billing Date Calculator - FIXED WITH CORRECT XML-RPC API listening on port ${port}`);
   console.log('Features enabled:');
   console.log(`  - Airtable: ${!!process.env.AIRTABLE_API_KEY ? '✓' : '✗'}`);
   console.log(`  - Webhook: ${!!process.env.WEBHOOK_URL ? '✓' : '✗'}`);
@@ -1046,12 +919,14 @@ app.listen(port, () => {
   console.log(`  - Production Tokens: ${!!(process.env.KEAP_ACCESS_TOKEN && process.env.KEAP_REFRESH_TOKEN) ? '✓' : '✗'}`);
   console.log(`  - Legacy API: ${!!process.env.KEAP_API_TOKEN ? '✓' : '✗'}`);
   console.log(`  - Automatic Token Refresh: ${!!(currentTokens.access_token && currentTokens.refresh_token) ? '✓' : '✗'}`);
-  console.log(`  - 🎯 Human-Friendly Goals: ✓`);
-  console.log(`  - 🔍 Real-time Goal Discovery: ✓`);
-  console.log(`  - ⚡ Timeout Protection: ✓`);
-  console.log(`  - 🔄 Smart Fallback: ✓`);
-  console.log(`  - 🚀 SHORT Call Names (Keap limits): ✓`);
+  console.log(`  - ✅ XML-RPC FunnelService: ✓ (FIXED - was using wrong REST API)`);
+  console.log(`  - 🎯 Campaign Goals Support: ✓ (Now works with any integration/callName)`);
   console.log(`  - 🤖 AUTONOMOUS OPERATION: ${!!(process.env.KEAP_ACCESS_TOKEN && process.env.KEAP_REFRESH_TOKEN) ? '✓ NO HUMAN INTERVENTION REQUIRED' : '✗ Set token env vars for autonomous mode'}`);
+  console.log('');
+  console.log('🔧 CRITICAL FIX APPLIED:');
+  console.log('  - Now uses XML-RPC FunnelService.achieveGoal instead of REST API');
+  console.log('  - Campaign goals now work as per Keap documentation');
+  console.log('  - Integration and CallName are YOUR choice (e.g., zeyadhq, billcalcsucc)');
 });
 
 module.exports = app;
